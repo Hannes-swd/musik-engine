@@ -177,13 +177,14 @@ struct SynthBassVoice {
     }
     bool finished() const { return env.idle(); }
 };
-DEFINE_INSTRUMENT(SynthBass, SynthBassVoice, "Synth-Bass", 38, 12, 0.37f, false)
+DEFINE_INSTRUMENT(SynthBass, SynthBassVoice, "Synth-Bass", 38, 12, 0.415f, false)
 
 // --------------------------------------------------------------------
 // Gezupfte Saite (Karplus-Strong mit Allpass-Feinstimmung): Gitarre und Kontrabass
-template <int Kind>   // 0 = Gitarre, 1 = Kontrabass, 2 = Harfe
+template <int Kind>   // 0 = Gitarre, 1 = Kontrabass, 2 = Harfe, 3 = Pizzicato, 4 = Cembalo, 5 = Ukulele, 6 = Mandoline, 7 = Banjo
 struct PluckVoice {
-    static constexpr bool Bass = Kind == 1, Harp = Kind == 2, Pizz = Kind == 3;
+    static constexpr bool Bass = Kind == 1, Harp = Kind == 2, Pizz = Kind == 3, Cemb = Kind == 4;
+    static constexpr bool Uke = Kind == 5, Mando = Kind == 6, Banjo = Kind == 7;
     std::array<float, 4096> buf{};
     int len = 100, idx = 0;
     float sr = 48000, g = 0.99f, apC = 0, apX1 = 0, apY1 = 0, prevX = 0, vel = 1, period = 100;
@@ -191,9 +192,9 @@ struct PluckVoice {
     bool released = false;
     SVF body;
     Noise noise;
-    void start(int pitch, float v, float s) {
+    void start(int pitch, float v, float s, float cents = 0.f) {
         sr = s; vel = v; released = false; life = 0; idx = 0; apX1 = apY1 = prevX = 0;
-        const float f = midiToFreq(float(pitch));
+        const float f = midiToFreq(float(pitch) + cents * 0.01f);
         period = std::clamp(sr / f, 4.f, 4000.f);
         float d = period - 0.5f;   // Mittelwert-Filter verzögert um eine halbe Probe
         len = int(d);
@@ -202,21 +203,32 @@ struct PluckVoice {
         apC = (1.f - frac) / (1.f + frac);
         // Anregung: gefiltertes Rauschen (Anschlag weicher/härter je nach Velocity)
         noise.seed(uint32_t(pitch * 92821 + int(v * 1000)));
-        const float bright = Bass ? 0.2f + 0.3f * v : Harp ? 0.55f + 0.35f * v : Pizz ? 0.3f + 0.35f * v : 0.35f + 0.55f * v;
+        const float bright = Uke ? 0.5f + 0.3f * v : Mando ? 0.8f + 0.15f * v : Banjo ? 0.93f : Cemb ? 0.92f : Bass ? 0.2f + 0.3f * v : Harp ? 0.55f + 0.35f * v : Pizz ? 0.3f + 0.35f * v : 0.35f + 0.55f * v;
         float y = 0, mean = 0;
         for (int i = 0; i < len; ++i) { y += bright * (noise.next() - y); buf[size_t(i)] = y; mean += y; }
         mean /= float(len);
         for (int i = 0; i < len; ++i) buf[size_t(i)] -= mean;
-        const float t60 = Bass ? 2.2f : Pizz ? std::clamp(0.9f - float(pitch - 40) * 0.008f, 0.35f, 0.9f) : Harp ? std::clamp(7.f - float(pitch - 40) * 0.07f, 1.5f, 7.f) : std::clamp(4.5f - float(pitch - 40) * 0.05f, 1.f, 4.5f);
+        const float t60 = Uke ? std::clamp(1.6f - float(pitch - 60) * 0.02f, 0.6f, 1.6f)
+                        : Mando ? std::clamp(1.3f - float(pitch - 60) * 0.015f, 0.5f, 1.3f)
+                        : Banjo ? std::clamp(0.9f - float(pitch - 60) * 0.01f, 0.4f, 0.9f) : Cemb ? std::clamp(3.2f - float(pitch - 40) * 0.035f, 0.9f, 3.2f) : Bass ? 2.2f : Pizz ? std::clamp(0.9f - float(pitch - 40) * 0.008f, 0.35f, 0.9f) : Harp ? std::clamp(7.f - float(pitch - 40) * 0.07f, 1.5f, 7.f) : std::clamp(4.5f - float(pitch - 40) * 0.05f, 1.f, 4.5f);
         g = std::pow(10.f, -3.f * period / (t60 * sr));
         maxLife = t60 * 1.1f;
         body = SVF{};
-        body.set(Bass ? 900.f : Harp ? 7000.f : Pizz ? 3200.f : 5000.f, 0.1f, sr);
+        body.set(Uke ? 3800.f : Mando ? 7000.f : Banjo ? 8500.f : Cemb ? 9500.f : Bass ? 900.f : Harp ? 7000.f : Pizz ? 3200.f : 5000.f, 0.1f, sr);
     }
     void release() {
         released = true;
-        g = std::pow(10.f, -3.f * period / ((Bass ? 0.25f : Harp ? 1.2f : 0.18f) * sr));   // abdämpfen (Harfe klingt nach)
+        g = std::pow(10.f, -3.f * period / (((Uke || Mando || Banjo) ? 0.15f : Cemb ? 0.1f : Bass ? 0.25f : Harp ? 1.2f : 0.18f) * sr));   // abdämpfen (Harfe klingt nach)
         maxLife = life + (Harp ? 1.5f : 0.35f);
+    }
+    // erneut anzupfen, ohne die schwingende Saite zu löschen (Mandolinen-Tremolo)
+    void excite(float amt, float bright) {
+        float y = 0, mean = 0;
+        std::array<float, 4096> ex;
+        for (int i = 0; i < len; ++i) { y += bright * (noise.next() - y); ex[size_t(i)] = y; mean += y; }
+        mean /= float(len);
+        for (int i = 0; i < len; ++i) { auto& b = buf[size_t((idx + i) % len)]; b = b * 0.5f + (ex[size_t(i)] - mean) * amt; }
+        life = 0;
     }
     float next() {
         const float x = buf[size_t(idx)];
@@ -228,7 +240,7 @@ struct PluckVoice {
         buf[size_t(idx)] = ap * g;
         if (++idx >= len) idx = 0;
         life += 1.f / sr;
-        return body.process(x) * (Bass ? 2.2f : 1.6f) * (0.5f + 0.5f * vel);
+        return body.process(x) * (Bass ? 2.2f : 1.6f) * (Cemb ? 0.85f : 0.5f + 0.5f * vel);   // Cembalo: kaum Anschlagsdynamik
     }
     bool finished() const { return life > maxLife; }
 };
@@ -236,14 +248,19 @@ using GuitarVoice = PluckVoice<0>;
 using UprightVoice = PluckVoice<1>;
 using HarpVoice = PluckVoice<2>;
 using PizzVoice = PluckVoice<3>;
-DEFINE_INSTRUMENT(Guitar, GuitarVoice, "Gitarre", 24, 16, 0.7f, false)
+using HarpsichordVoice = PluckVoice<4>;
+using UkuleleVoice = PluckVoice<5>;
+using MandolinVoice = PluckVoice<6>;
+using BanjoVoice = PluckVoice<7>;
+DEFINE_INSTRUMENT(Guitar, GuitarVoice, "Gitarre", 24, 16, 0.556f, false)
 DEFINE_INSTRUMENT(UprightBass, UprightVoice, "Kontrabass", 32, 8, 1.15f, false)
-DEFINE_INSTRUMENT(Harp, HarpVoice, "Harfe", 46, 24, 0.6f, false)
+DEFINE_INSTRUMENT(Harp, HarpVoice, "Harfe", 46, 24, 0.46f, false)
 DEFINE_INSTRUMENT(Pizzicato, PizzVoice, "Pizzicato", 45, 24, 1.1f, false)
 
 // --------------------------------------------------------------------
 // Flöte: Sinus mit Obertönen, Atemrauschen, verzögertes Vibrato
-struct FluteVoice {
+template <int Kind>   // 0 = Flöte, 1 = Piccolo (heller, mehr Luft, schnelleres Vibrato)
+struct FluteVoiceT {
     float sr = 48000, f = 440, t = 0, vel = 1, ph = 0;
     Humanize hz;   // pro Anschlag leicht anders
     ADSR env;
@@ -260,7 +277,7 @@ struct FluteVoice {
     void release() { env.noteOff(); }
     float next() {
         const float vibDepth = std::clamp((t - 0.25f) * 2.f, 0.f, 1.f) * 9.f;
-        const float fr = f * centsToRatio(vibDepth * std::sin(kTwoPi * 5.f * hz.rate * t + hz.phase));
+        const float fr = f * centsToRatio(vibDepth * std::sin(kTwoPi * (Kind == 1 ? 5.8f : 5.f) * hz.rate * t + hz.phase));
         const float tone = std::sin(kTwoPi * ph) + 0.22f * std::sin(2 * kTwoPi * ph) + 0.07f * std::sin(3 * kTwoPi * ph);
         ph += fr / sr;
         ph -= std::floor(ph);
@@ -268,11 +285,14 @@ struct FluteVoice {
         const float chiff = t < 0.06f ? (1.f - t / 0.06f) * 0.25f : 0.f;
         t += 1.f / sr;
         const float e = env.next();
-        return (tone * 0.75f + breath.bp * (0.12f + chiff)) * e * (0.5f + 0.5f * vel);
+        return (tone * 0.75f + breath.bp * ((Kind == 1 ? 0.2f : 0.12f) + chiff)) * e * (0.5f + 0.5f * vel);
     }
     bool finished() const { return env.idle(); }
 };
+using FluteVoice = FluteVoiceT<0>;
+using PiccoloVoice = FluteVoiceT<1>;
 DEFINE_INSTRUMENT(Flute, FluteVoice, "Flöte", 73, 12, 0.17f, true)
+DEFINE_INSTRUMENT(Piccolo, PiccoloVoice, "Piccolo", 72, 12, 0.17f, true)
 
 // --------------------------------------------------------------------
 // Lead-Synth: Rechteck + Sägezahn, Filter, Vibrato
@@ -299,7 +319,7 @@ struct LeadVoice {
     }
     bool finished() const { return env.idle(); }
 };
-DEFINE_INSTRUMENT(Lead, LeadVoice, "Lead", 80, 12, 0.195f, true)
+DEFINE_INSTRUMENT(Lead, LeadVoice, "Lead", 80, 12, 0.182f, true)
 
 // --------------------------------------------------------------------
 // Mallets: Marimba (Holz, kurze Obertöne) und Glocken (FM, lang ausklingend)
@@ -336,7 +356,7 @@ struct MalletVoice {
 using MarimbaVoice = MalletVoice<false>;
 using BellVoice = MalletVoice<true>;
 DEFINE_INSTRUMENT(Marimba, MarimbaVoice, "Marimba", 12, 16, 0.29f, false)
-DEFINE_INSTRUMENT(Bells, BellVoice, "Glocken", 14, 16, 0.19f, false)
+DEFINE_INSTRUMENT(Bells, BellVoice, "Glocken", 14, 16, 0.144f, false)
 
 // ====================================================================
 //  ORCHESTER
@@ -393,10 +413,10 @@ using ViolinVoice = SectionStringVoice<0>;
 using ViolaVoice = SectionStringVoice<1>;
 using CelloVoice = SectionStringVoice<2>;
 using ContrabassVoice = SectionStringVoice<3>;
-DEFINE_INSTRUMENT(Violins, ViolinVoice, "Violinen", 48, 24, 0.336f, true)
+DEFINE_INSTRUMENT(Violins, ViolinVoice, "Violinen", 48, 24, 0.317f, true)
 DEFINE_INSTRUMENT(Violas, ViolaVoice, "Bratschen", 48, 24, 0.26f, true)
 DEFINE_INSTRUMENT(Cellos, CelloVoice, "Celli", 42, 16, 0.28f, true)
-DEFINE_INSTRUMENT(Contrabasses, ContrabassVoice, "Kontrabässe", 43, 12, 0.28f, true)
+DEFINE_INSTRUMENT(Contrabasses, ContrabassVoice, "Kontrabässe", 43, 12, 0.241f, true)
 
 // Blechbläser als Satz (3 Spieler): je lauter, desto heller und "schmetternder"; jeder Spieler setzt
 // minimal versetzt ein, ist leicht verstimmt und rutscht beim Ansatz von unten in den Ton. Dazu Atem beim
@@ -404,10 +424,11 @@ DEFINE_INSTRUMENT(Contrabasses, ContrabassVoice, "Kontrabässe", 43, 12, 0.28f, 
 struct BrassParams { float attack, release, brightMul, brightAdd, scoopCents, vibCents, formant, formantQ, spreadCents; };
 template <int Kind>
 struct BrassVoice {
-    static constexpr BrassParams P[3] = {
+    static constexpr BrassParams P[4] = {
         {0.07f, 0.30f, 2.5f, 450.f, -20.f, 4.f, 480.f, 0.55f, 5.f},     // Hörner
         {0.025f, 0.16f, 6.f, 1100.f, -35.f, 7.f, 1350.f, 0.5f, 4.f},    // Trompeten
         {0.04f, 0.24f, 4.f, 420.f, -25.f, 4.f, 620.f, 0.5f, 5.f},       // Posaunen
+        {0.06f, 0.28f, 1.8f, 220.f, -15.f, 3.f, 280.f, 0.5f, 4.f},      // Tuba
     };
     static constexpr int kPlayers = 3;
     float sr = 48000, f = 440, t = 0, vel = 1;
@@ -466,8 +487,9 @@ struct BrassVoice {
 using HornVoice = BrassVoice<0>;
 using TrumpetVoice = BrassVoice<1>;
 using TromboneVoice = BrassVoice<2>;
+using TubaVoice = BrassVoice<3>;
 DEFINE_INSTRUMENT(Horns, HornVoice, "Hörner", 60, 16, 0.44f, true)
-DEFINE_INSTRUMENT(Trumpets, TrumpetVoice, "Trompeten", 56, 12, 0.441f, true)
+DEFINE_INSTRUMENT(Trumpets, TrumpetVoice, "Trompeten", 56, 12, 0.402f, true)
 DEFINE_INSTRUMENT(Trombones, TromboneVoice, "Posaunen", 57, 12, 0.398f, true)
 
 // Holzbläser: Oboe (schmaler Puls, nasal), Klarinette (nur ungerade Obertöne), Fagott
@@ -513,13 +535,13 @@ struct WoodwindVoice {
 using OboeVoice = WoodwindVoice<0>;
 using ClarinetVoice = WoodwindVoice<1>;
 using BassoonVoice = WoodwindVoice<2>;
-DEFINE_INSTRUMENT(Oboe, OboeVoice, "Oboe", 68, 8, 0.093f, true)
+DEFINE_INSTRUMENT(Oboe, OboeVoice, "Oboe", 68, 8, 0.129f, true)
 DEFINE_INSTRUMENT(Clarinet, ClarinetVoice, "Klarinette", 71, 8, 0.10f, true)
-DEFINE_INSTRUMENT(Bassoon, BassoonVoice, "Fagott", 70, 8, 0.083f, true)
+DEFINE_INSTRUMENT(Bassoon, BassoonVoice, "Fagott", 70, 8, 0.098f, true)
 
 // Pauken: gestimmte Membran (unharmonische Schwingungsmoden) + Schlaggeräusch
 struct TimpaniVoice {
-    float sr = 48000, f = 100, vel = 1;
+    float sr = 48000, f = 100, vel = 1, t = 0;
     std::array<float, 5> ph{};
     std::array<Decay, 5> modes;
     Decay strike;
@@ -528,7 +550,7 @@ struct TimpaniVoice {
     void start(int pitch, float v, float s) {
         static const float dec[5] = {2.6f, 1.6f, 1.2f, 0.9f, 0.6f};
         static const float amp[5] = {1.f, 0.5f, 0.35f, 0.2f, 0.1f};
-        sr = s; f = midiToFreq(float(pitch)); vel = v; ph.fill(0);
+        sr = s; f = midiToFreq(float(pitch)); vel = v; ph.fill(0); t = 0;
         for (int i = 0; i < 5; ++i) modes[size_t(i)].start(amp[i] * (0.3f + 0.7f * v), dec[i] * (0.6f + 0.4f * v), sr);
         strike.start(0.6f * v, 0.04f, sr);
         filt = SVF{};
@@ -541,10 +563,11 @@ struct TimpaniVoice {
         float s = 0;
         for (int i = 0; i < 5; ++i) {
             s += std::sin(kTwoPi * ph[size_t(i)]) * modes[size_t(i)].next();
-            ph[size_t(i)] += f * ratio[i] / sr;
+            ph[size_t(i)] += f * ratio[i] * (1.f + 0.02f * vel * std::exp(-t * 25.f)) / sr;   // Fell kurz straffer
             ph[size_t(i)] -= std::floor(ph[size_t(i)]);
         }
         s += filt.process(noise.next()) * strike.next();
+        t += 1.f / sr;
         return s;
     }
     bool finished() const { return modes[0].value < 1e-4f; }
@@ -594,7 +617,7 @@ struct ChoirVoice {
     }
     bool finished() const { return env.idle(); }
 };
-DEFINE_INSTRUMENT(Choir, ChoirVoice, "Chor", 52, 24, 0.22f, true)
+DEFINE_INSTRUMENT(Choir, ChoirVoice, "Chor", 52, 24, 0.238f, true)
 
 // --------------------------------------------------------------------
 // Taiko: große japanische Trommeln (Ensemble) – Odaiko, Nagado, Shime, Rand-Schlag
@@ -653,7 +676,8 @@ public:
 
 // --------------------------------------------------------------------
 // Schlagzeug: synthetisch, General-MIDI-Belegung
-enum class Drum { Kick, Snare, Clap, Rim, HatClosed, HatPedal, HatOpen, Tom, Crash, Ride, RideBell, Cowbell, Tambourine, Shaker, Click };
+enum class Drum { Kick, Snare, Clap, Rim, HatClosed, HatPedal, HatOpen, Tom, Crash, Ride, RideBell, Cowbell, Tambourine, Shaker, Click,
+                  Triangle, Claves, WoodBlock, Gong, CymbalRoll, Conga, Bongo, Agogo, Guiro, Chimes };
 
 Drum drumFor(int pitch) {
     switch (pitch) {
@@ -665,7 +689,17 @@ Drum drumFor(int pitch) {
     case 42: return Drum::HatClosed;
     case 44: return Drum::HatPedal;
     case 46: return Drum::HatOpen;
-    case 49: case 52: case 55: case 57: return Drum::Crash;
+    case 49: case 57: return Drum::Crash;
+    case 52: return Drum::Gong;                     // (statt China-Becken) Orchester-Gong
+    case 55: return Drum::CymbalRoll;               // (statt Splash) Becken-Wirbel mit Schwellen
+    case 75: return Drum::Claves;
+    case 76: case 77: return Drum::WoodBlock;
+    case 80: case 81: return Drum::Triangle;
+    case 60: case 61: return Drum::Bongo;
+    case 62: case 63: case 64: return Drum::Conga;
+    case 67: case 68: return Drum::Agogo;
+    case 73: case 74: return Drum::Guiro;
+    case 84: return Drum::Chimes;
     case 51: case 59: return Drum::Ride;
     case 53: return Drum::RideBell;
     case 54: return Drum::Tambourine;
@@ -682,6 +716,8 @@ struct DrumVoice {
     SVF filt;
     Noise noise;
     std::array<Osc, 6> metal;
+    std::array<float, 6> part{};   // Teilton-Phasen (Triangel, Gong)
+    bool openTri = true;
 
     float metallic() {   // sechs unharmonische Rechtecke (klassischer Becken-Trick)
         static const float fr[6] = {205.3f, 304.4f, 369.6f, 522.7f, 540.f, 800.f};
@@ -711,6 +747,18 @@ struct DrumVoice {
         case Drum::Tambourine: amp.start(lvl, 0.14f, sr); filt.set(8000.f, 0.3f, sr); break;
         case Drum::Shaker: amp.start(lvl * 0.7f, 0.07f, sr); filt.set(6500.f, 0.2f, sr); break;
         case Drum::Click: f0 = pitch == 34 ? 2500.f : 1600.f; amp.start(lvl * 0.8f, 0.04f, sr); break;
+        case Drum::Triangle: openTri = pitch == 81; part.fill(0.f); amp.start(lvl * 0.7f, openTri ? 2.6f : 0.16f, sr); break;
+        case Drum::Claves: amp.start(lvl, 0.06f, sr); break;
+        case Drum::WoodBlock: f0 = pitch == 76 ? 1050.f : 780.f; amp.start(lvl, 0.07f, sr); filt.set(f0 * 1.4f, 0.8f, sr); break;
+        case Drum::Gong: part.fill(0.f); amp.start(lvl, 6.5f, sr); aux.start(1.f, 0.9f, sr); filt.set(900.f, 0.3f, sr); break;
+        case Drum::CymbalRoll: amp.start(lvl, 2.6f, sr); filt.set(5000.f, 0.15f, sr); break;
+        case Drum::Conga:   // 62 = hoch gedämpft (Slap), 63 = hoch offen, 64 = tief offen
+            f0 = pitch == 64 ? 196.f : 262.f; amp.start(lvl, pitch == 62 ? 0.07f : 0.32f, sr); aux.start(1.f, pitch == 62 ? 0.03f : 0.012f, sr);
+            filt.set(pitch == 62 ? 1800.f : 900.f, 0.4f, sr); break;
+        case Drum::Bongo: f0 = pitch == 60 ? 440.f : 330.f; amp.start(lvl, 0.18f, sr); aux.start(1.f, 0.008f, sr); filt.set(2400.f, 0.4f, sr); break;
+        case Drum::Agogo: f0 = pitch == 67 ? 920.f : 690.f; part.fill(0.f); amp.start(lvl * 0.8f, 0.45f, sr); break;
+        case Drum::Guiro: amp.start(lvl, pitch == 73 ? 0.12f : 0.38f, sr); filt.set(3200.f, 0.5f, sr); f0 = pitch == 73 ? 0.1f : 0.34f; break;
+        case Drum::Chimes: part.fill(0.f); amp.start(lvl * 0.8f, 2.2f, sr); break;
         case Drum::Tom: {
             static const std::array<std::pair<int, float>, 6> toms = {{{41, 82.f}, {43, 98.f}, {45, 110.f}, {47, 131.f}, {48, 147.f}, {50, 175.f}}};
             f0 = midiToFreq(float(pitch)) * 0.5f;
@@ -783,6 +831,92 @@ struct DrumVoice {
             ph += f0 / sr;
             s = std::sin(kTwoPi * ph) * amp.next();
             break;
+        case Drum::Triangle: {   // dichte, hohe, leicht unharmonische Teiltöne – "Ting"
+            static const float tr[6] = {2420.f, 3580.f, 5030.f, 6420.f, 7890.f, 9300.f};
+            static const float ta[6] = {1.f, 0.7f, 0.55f, 0.4f, 0.3f, 0.2f};
+            for (int i = 0; i < 6; ++i) {
+                s += std::sin(kTwoPi * part[size_t(i)]) * ta[i];
+                part[size_t(i)] += tr[i] / sr;
+                part[size_t(i)] -= std::floor(part[size_t(i)]);
+            }
+            s = s * 0.22f * amp.next() + n * 0.05f * std::exp(-t * 200.f);
+            break;
+        }
+        case Drum::Claves: {     // zwei Hartholzstäbe: kurzer, hoher, klarer Ton
+            ph += 2500.f / sr;
+            s = std::sin(kTwoPi * ph) * amp.next() * 0.9f;
+            break;
+        }
+        case Drum::WoodBlock: {
+            ph += f0 / sr;
+            filt.process(n);
+            s = (std::sin(kTwoPi * ph) * 0.8f + filt.bp * 0.4f) * amp.next();
+            break;
+        }
+        case Drum::Gong: {       // tiefe, unharmonische Teiltöne, die langsam aufblühen
+            static const float gr[6] = {70.f, 113.f, 161.f, 217.f, 292.f, 389.f};
+            static const float ga[6] = {1.f, 0.8f, 0.7f, 0.55f, 0.45f, 0.35f};
+            const float bloom = 1.f - aux.next() * 0.6f;   // höhere Teiltöne kommen etwas später
+            for (int i = 0; i < 6; ++i) {
+                const float wob = 1.f + 0.003f * std::sin(kTwoPi * (0.7f + 0.3f * float(i)) * t);
+                s += std::sin(kTwoPi * part[size_t(i)]) * ga[i] * (i < 2 ? 1.f : bloom);
+                part[size_t(i)] += gr[i] * wob / sr;
+                part[size_t(i)] -= std::floor(part[size_t(i)]);
+            }
+            filt.process(n);
+            s = (s * 0.3f + filt.bp * 0.08f * std::exp(-t * 6.f)) * amp.next();
+            break;
+        }
+        case Drum::CymbalRoll: { // Becken mit Schlegeln gewirbelt: schwillt an, dann kurzer Ausklang
+            const float swell = t < 1.8f ? (t / 1.8f) * (t / 1.8f) : std::exp(-(t - 1.8f) * 3.f);
+            filt.process(metallic() * 0.5f + n * 0.7f);
+            s = filt.hp * swell * 0.55f * (0.25f + 0.75f * vel);
+            amp.next();
+            break;
+        }
+        case Drum::Conga: case Drum::Bongo: {   // Handtrommel: Fell mit kurzem Tonhöhen-Abfall + Handflächen-Klatsch
+            const float fr = f0 * (1.f + 0.12f * std::exp(-t * 60.f));
+            ph += fr / sr;
+            ph2 += fr * 1.59f / sr;   // erster Fell-Oberton
+            filt.process(n);
+            const float body = std::sin(kTwoPi * ph) + 0.3f * std::sin(kTwoPi * ph2) * std::exp(-t * 25.f);
+            s = (body * 0.8f + filt.bp * aux.next() * 1.4f * vel) * amp.next();
+            break;
+        }
+        case Drum::Agogo: {      // Doppelglocke: heller, leicht unharmonischer Metallton
+            static const float ar[3] = {1.f, 2.76f, 5.4f};
+            static const float aa[3] = {1.f, 0.45f, 0.18f};
+            for (int i = 0; i < 3; ++i) {
+                s += std::sin(kTwoPi * part[size_t(i)]) * aa[i] * (i ? std::exp(-t * 9.f * float(i)) : 1.f);
+                part[size_t(i)] += f0 * ar[i] / sr;
+                part[size_t(i)] -= std::floor(part[size_t(i)]);
+            }
+            s *= 0.45f * amp.next();
+            break;
+        }
+        case Drum::Guiro: {      // geriffelter Kürbis: Rauschen, das von den Rillen ~35x/s zerhackt wird
+            const float dur = f0;
+            const float ridge = 0.5f + 0.5f * std::sin(kTwoPi * 35.f * t);
+            const float gate = t < dur ? 1.f : std::exp(-(t - dur) * 60.f);
+            filt.process(n);
+            s = filt.bp * ridge * ridge * gate * 1.3f;
+            amp.next();
+            if (t > dur + 0.1f) amp.value = 0.f;
+            break;
+        }
+        case Drum::Chimes: {     // Windspiel: sechs hohe Röhrchen, die nacheinander angestoßen werden
+            static const float cr[6] = {3136.f, 3520.f, 3951.f, 4699.f, 5274.f, 5920.f};
+            for (int i = 0; i < 6; ++i) {
+                const float on = float(i) * 0.075f + 0.02f * float((i * 7) % 3);
+                if (t < on) continue;
+                const float tt = t - on;
+                s += std::sin(kTwoPi * part[size_t(i)]) * std::exp(-tt * 2.2f) * std::min(1.f, tt * 400.f);
+                part[size_t(i)] += cr[i] / sr;
+                part[size_t(i)] -= std::floor(part[size_t(i)]);
+            }
+            s *= 0.16f * amp.next();
+            break;
+        }
         case Drum::Tom: {
             const float fr = f0 * (1.f + 0.5f * std::exp(-t * 18.f));
             ph += fr / sr;
@@ -812,6 +946,13 @@ public:
         case 50: return "Tom hoch";     case 51: return "Ride";        case 53: return "Ride Glocke";
         case 54: return "Tamburin";     case 56: return "Kuhglocke";   case 57: return "Crash 2";
         case 59: return "Ride 2";       case 70: return "Shaker";
+        case 52: return "Gong";         case 55: return "Becken-Wirbel";
+        case 75: return "Claves";       case 76: return "Holzblock hoch"; case 77: return "Holzblock tief";
+        case 80: return "Triangel gedämpft"; case 81: return "Triangel";
+        case 60: return "Bongo hoch";   case 61: return "Bongo tief";
+        case 62: return "Conga Slap";   case 63: return "Conga hoch";  case 64: return "Conga tief";
+        case 67: return "Agogo hoch";   case 68: return "Agogo tief";
+        case 73: return "Guiro kurz";   case 74: return "Guiro lang";  case 84: return "Windspiel";
         default: return nullptr;
         }
     }
@@ -823,6 +964,434 @@ protected:
             if (s.active && s.pitch == 46) s.voice.choke();
     }
 };
+
+// ====================================================================
+//  WEITERE INSTRUMENTE
+// ====================================================================
+
+// Saxofon (0 = Alt, 1 = Tenor): Rohrblatt -> Rechteck + Sägezahn, zwei Formanten (Korpus), Atem,
+// jazziger Ansatz von unten, verzögertes Vibrato, bei forte etwas "Growl"
+template <int Kind>
+struct SaxVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    Humanize hz;   // pro Anschlag leicht anders
+    Osc o1, o2;
+    SVF lp, fm1, fm2, br;
+    ADSR env;
+    Noise noise;
+    void start(int pitch, float v, float s) {
+        static const float F1[2] = {650.f, 470.f}, F2[2] = {1550.f, 1150.f};
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; hz.init(pitch); f *= centsToRatio(hz.cents);
+        o1.phase = 0.f; o2.phase = 0.3f;
+        env.attack = 0.02f + 0.04f * (1.f - v); env.decay = 0.3f; env.sustain = 0.85f; env.release = 0.12f;
+        env.start(sr);
+        lp = SVF{}; fm1 = SVF{}; fm2 = SVF{}; br = SVF{};
+        lp.set(std::min(f * (3.f + 5.f * v) + 600.f, 11000.f), 0.15f, sr);
+        fm1.set(F1[Kind], 0.7f, sr);
+        fm2.set(F2[Kind], 0.7f, sr);
+        br.set(std::min(f * 3.f, 7000.f), 0.6f, sr);
+        noise.seed(uint32_t(pitch * 3331 + Kind));
+    }
+    void release() { env.noteOff(); }
+    float next() {
+        const float e = env.next();
+        const float scoop = -40.f * std::exp(-t * 28.f);
+        const float vibDepth = std::clamp((t - 0.25f) * 2.f, 0.f, 1.f) * 13.f;
+        const float fr = f * centsToRatio(scoop + vibDepth * std::sin(kTwoPi * 5.4f * hz.rate * t + hz.phase));
+        float s = o1.next(fr, sr, Wave::Square, 0.42f) * 0.55f + o2.next(fr * 1.001f, sr, Wave::Saw) * 0.45f;
+        s = lp.process(s);
+        fm1.process(s);
+        fm2.process(s);
+        float y = s * 0.5f + fm1.bp * 0.9f + fm2.bp * 0.6f;
+        if (vel > 0.7f) y *= 1.f + (vel - 0.7f) * 0.8f * std::sin(kTwoPi * 31.f * t);   // Growl
+        br.process(noise.next());
+        y += br.bp * (0.05f + 0.15f * std::exp(-t * 20.f));
+        t += 1.f / sr;
+        return softClip(y * 1.4f) * e * (0.5f + 0.5f * vel);
+    }
+    bool finished() const { return env.idle(); }
+};
+using AltoSaxVoice = SaxVoice<0>;
+using TenorSaxVoice = SaxVoice<1>;
+DEFINE_INSTRUMENT(AltoSax, AltoSaxVoice, "Saxofon", 65, 12, 0.2f, true)
+DEFINE_INSTRUMENT(TenorSax, TenorSaxVoice, "Tenorsaxofon", 66, 12, 0.191f, true)
+
+// Mundharmonika: schmaler Puls, viel Luft, Ton zieht beim Anblasen leicht von unten, Hand-Tremolo
+struct HarmonicaVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    Humanize hz;   // pro Anschlag leicht anders
+    Osc o;
+    SVF lp, br, fm;
+    ADSR env;
+    Noise noise;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; hz.init(pitch); f *= centsToRatio(hz.cents);
+        o.phase = 0.f;
+        env.attack = 0.03f; env.decay = 0.2f; env.sustain = 0.9f; env.release = 0.08f;
+        env.start(sr);
+        lp = SVF{}; br = SVF{}; fm = SVF{};
+        lp.set(std::min(f * 6.f + 900.f * v, 9000.f), 0.2f, sr);
+        br.set(std::min(f * 2.5f, 6000.f), 0.6f, sr);
+        fm.set(1700.f, 0.6f, sr);
+        noise.seed(uint32_t(pitch * 271 + 9));
+    }
+    void release() { env.noteOff(); }
+    float next() {
+        const float bend = -30.f * std::exp(-t * 18.f);
+        const float fr = f * centsToRatio(bend + 6.f * std::sin(kTwoPi * 5.5f * hz.rate * t + hz.phase));
+        float s = lp.process(o.next(fr, sr, Wave::Square, 0.3f));
+        fm.process(s);
+        s = s * 0.6f + fm.bp * 0.7f;
+        br.process(noise.next());
+        s += br.bp * 0.18f;
+        const float trem = 1.f - 0.22f * std::clamp((t - 0.35f) * 2.f, 0.f, 1.f) * (0.5f + 0.5f * std::sin(kTwoPi * 6.2f * hz.rate * t));
+        t += 1.f / sr;
+        return s * trem * env.next() * (0.55f + 0.45f * vel);
+    }
+    bool finished() const { return env.idle(); }
+};
+DEFINE_INSTRUMENT(Harmonica, HarmonicaVoice, "Mundharmonika", 22, 12, 0.132f, true)
+
+// Akkordeon: zwei leicht gegeneinander verstimmte Zungen ("Musette") + eine Oktave tiefer, Balg-Hüllkurve
+struct AccordionVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    Osc a, b, c;
+    SVF lp;
+    ADSR env;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0;
+        a.phase = 0.f; b.phase = 0.37f; c.phase = 0.61f;
+        env.attack = 0.04f; env.decay = 0.3f; env.sustain = 0.9f; env.release = 0.08f;
+        env.start(sr);
+        lp = SVF{};
+        lp.set(std::min(f * 5.f + 1500.f * v, 9000.f), 0.25f, sr);
+    }
+    void release() { env.noteOff(); }
+    float next() {
+        float s = a.next(f * centsToRatio(-7.f), sr, Wave::Square, 0.38f) + b.next(f * centsToRatio(7.f), sr, Wave::Square, 0.42f) +
+                  0.45f * c.next(f * 0.5f, sr, Wave::Saw);
+        t += 1.f / sr;
+        return lp.process(s * 0.4f) * env.next() * (0.6f + 0.4f * vel);
+    }
+    bool finished() const { return env.idle(); }
+};
+DEFINE_INSTRUMENT(Accordion, AccordionVoice, "Akkordeon", 21, 16, 0.159f, true)
+
+// Gestimmte Schlaginstrumente aus Sinus-Teiltönen: Celesta, Xylophon, Vibraphon, Röhrenglocken
+template <int Kind>   // 0 = Celesta, 1 = Xylophon, 2 = Vibraphon, 3 = Röhrenglocken
+struct BarVoice {
+    static constexpr int kN = 6;
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    std::array<float, kN> ph{}, ratio{}, amp{}, coef{}, lvl{};
+    float click = 0.f, clickCoef = 0.f, damp = 1.f, dampCoef = 1.f;
+    bool released = false;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; released = false; damp = 1.f; dampCoef = 1.f;
+        ph.fill(0.f);
+        float T = 1.f;
+        switch (Kind) {
+        case 0:   // Celesta: zarte Hammer-Glöckchen
+            ratio = {1.f, 2.f, 3.f, 4.f, 0.f, 0.f}; amp = {1.f, 0.35f, 0.12f, 0.2f, 0.f, 0.f};
+            T = std::clamp(2.4f - float(pitch - 60) * 0.03f, 0.7f, 3.f);
+            break;
+        case 1:   // Xylophon: Holz, 3. Teilton gestimmt, kurz
+            ratio = {1.f, 3.f, 6.f, 0.f, 0.f, 0.f}; amp = {1.f, 0.5f * v, 0.15f * v, 0.f, 0.f, 0.f};
+            T = std::clamp(0.6f - float(pitch - 60) * 0.012f, 0.15f, 0.8f);
+            break;
+        case 2:   // Vibraphon: Metall, 4. Teilton, lang
+            ratio = {1.f, 4.f, 10.f, 0.f, 0.f, 0.f}; amp = {1.f, 0.3f, 0.05f, 0.f, 0.f, 0.f};
+            T = std::clamp(4.f - float(pitch - 60) * 0.05f, 1.5f, 5.f);
+            break;
+        default:  // Röhrenglocken: unharmonische Teiltöne, sehr lang
+            ratio = {0.5f, 1.f, 1.32f, 1.79f, 2.33f, 2.9f}; amp = {0.3f, 1.f, 0.6f, 0.45f, 0.3f, 0.2f};
+            T = std::clamp(6.f - float(pitch - 60) * 0.06f, 2.5f, 7.f);
+            break;
+        }
+        for (int i = 0; i < kN; ++i) {
+            const float Ti = T / (1.f + float(i) * (Kind == 1 ? 1.5f : 0.6f));
+            coef[size_t(i)] = std::exp(-1.f / (std::max(0.02f, Ti) * sr / 4.6f));
+            lvl[size_t(i)] = (f * ratio[size_t(i)] < sr * 0.45f) ? amp[size_t(i)] : 0.f;
+        }
+        click = Kind == 1 ? 0.35f * v : 0.12f * v;
+        clickCoef = std::exp(-1.f / (0.004f * sr));
+    }
+    void release() {
+        released = true;
+        // Vibraphon/Celesta haben Dämpfer; Xylophon und Röhrenglocken klingen frei aus
+        if constexpr (Kind == 0 || Kind == 2) dampCoef = std::exp(-1.f / (0.25f * sr / 4.6f));
+    }
+    float next() {
+        float s = 0.f;
+        for (int i = 0; i < kN; ++i) {
+            if (lvl[size_t(i)] < 1e-6f) continue;
+            s += std::sin(kTwoPi * ph[size_t(i)]) * lvl[size_t(i)];
+            ph[size_t(i)] += f * ratio[size_t(i)] / sr;
+            ph[size_t(i)] -= std::floor(ph[size_t(i)]);
+            lvl[size_t(i)] *= coef[size_t(i)];
+        }
+        s += click * std::sin(kTwoPi * f * 7.3f * t);
+        click *= clickCoef;
+        if constexpr (Kind == 2) s *= 1.f - 0.35f * (0.5f + 0.5f * std::sin(kTwoPi * 5.5f * t));   // Motor-Tremolo
+        damp *= dampCoef;
+        t += 1.f / sr;
+        return s * damp * (0.35f + 0.65f * vel);
+    }
+    bool finished() const { return (lvl[1] < 1e-4f && lvl[0] < 1e-4f) || damp < 1e-4f; }
+};
+using CelestaVoice = BarVoice<0>;
+using XylophoneVoice = BarVoice<1>;
+using VibraphoneVoice = BarVoice<2>;
+using TubularBellsVoice = BarVoice<3>;
+DEFINE_INSTRUMENT(Celesta, CelestaVoice, "Celesta", 8, 16, 0.212f, false)
+DEFINE_INSTRUMENT(Xylophone, XylophoneVoice, "Xylophon", 13, 16, 0.413f, false)
+DEFINE_INSTRUMENT(Vibraphone, VibraphoneVoice, "Vibraphon", 11, 16, 0.23f, false)
+DEFINE_INSTRUMENT(TubularBells, TubularBellsVoice, "Röhrenglocken", 14, 12, 0.132f, false)
+
+// Cembalo (gezupfte Saite mit hellem Kiel-Anschlag)
+DEFINE_INSTRUMENT(Harpsichord, HarpsichordVoice, "Cembalo", 6, 24, 0.54f, false)
+
+// Tuba (Blech-Satzklang, tief und rund)
+DEFINE_INSTRUMENT(Tuba, TubaVoice, "Tuba", 58, 8, 0.48f, true)
+
+// E-Gitarre: gezupfte Saite -> Verzerrer -> Lautsprecher-Box (Tiefpass + Resonanz)
+struct EGuitarVoice {
+    GuitarVoice core;
+    SVF pre, cab, cab2;
+    float vel = 1.f, sr = 48000.f;
+    void start(int pitch, float v, float s) {
+        sr = s; vel = v;
+        core.start(pitch, std::min(1.f, 0.6f + 0.4f * v), s);
+        pre = SVF{}; cab = SVF{}; cab2 = SVF{};
+        pre.set(3500.f, 0.3f, s);
+        cab.set(4200.f, 0.4f, s);
+        cab2.set(1800.f, 0.9f, s);
+    }
+    void release() { core.release(); }
+    float next() {
+        const float x = pre.process(core.next());
+        const float drive = 5.f + 7.f * vel;
+        const float y = std::tanh(x * drive);
+        cab2.process(y);
+        return (cab.process(y) * 0.8f + cab2.bp * 0.35f) * 0.5f;
+    }
+    bool finished() const { return core.finished(); }
+};
+DEFINE_INSTRUMENT(EGuitar, EGuitarVoice, "E-Gitarre", 29, 16, 0.207f, false)
+
+// ====================================================================
+//  NOCH MEHR FARBEN: Kirchenorgel, Panflöte, Zupfinstrumente, Steel Drum, Kalimba
+// ====================================================================
+
+// Kirchenorgel: Pfeifen-Register (16', 8', 4', 2 2/3', 2', Mixtur), jede Reihe minimal verstimmt
+// (das typische "Schweben" großer Orgeln), Pfeifen-Ansprache mit Luft-"Chiff", Winddruck-Wackeln
+struct ChurchOrganVoice {
+    static constexpr int kN = 7;
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    Humanize hz;
+    std::array<float, kN> ph{}, det{};
+    ADSR env;
+    SVF chiff, wind;
+    Noise noise;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; ph.fill(0.f);
+        hz.init(pitch, 1.5f);
+        for (int i = 0; i < kN; ++i) det[size_t(i)] = centsToRatio((float((i * 5) % 7) - 3.f) * 0.9f + hz.cents);
+        env.attack = 0.045f; env.decay = 0.15f; env.sustain = 0.92f; env.release = 0.22f;
+        env.start(sr);
+        chiff = SVF{}; wind = SVF{};
+        chiff.set(std::min(f * 3.f, 9000.f), 0.7f, sr);
+        wind.set(std::min(f * 1.f, 6000.f), 0.85f, sr);
+        noise.seed(uint32_t(pitch * 6151 + 11));
+    }
+    void release() { env.noteOff(); }
+    float next() {
+        static const float ratio[kN] = {0.5f, 1.f, 2.f, 3.f, 4.f, 6.f, 8.f};
+        static const float amp[kN] = {0.55f, 1.f, 0.6f, 0.28f, 0.32f, 0.16f, 0.12f};
+        // Pfeifen sprechen nicht alle gleichzeitig an: hohe Register etwas schneller, tiefe langsamer
+        float s = 0;
+        for (int i = 0; i < kN; ++i) {
+            const float fr = f * ratio[i] * det[size_t(i)];
+            if (fr > sr * 0.42f) continue;
+            const float speak = std::min(1.f, t / (i == 0 ? 0.09f : 0.03f + 0.01f * float(i)));
+            const float x = std::sin(kTwoPi * ph[size_t(i)]);
+            s += (x + 0.08f * x * x * x) * amp[i] * speak;   // leicht "pfeifig" (ungerade Obertöne)
+            ph[size_t(i)] += fr / sr;
+            ph[size_t(i)] -= std::floor(ph[size_t(i)]);
+        }
+        const float n = noise.next();
+        chiff.process(n);
+        wind.process(n);
+        const float ch = t < 0.07f ? (1.f - t / 0.07f) : 0.f;
+        const float press = 1.f + 0.006f * std::sin(kTwoPi * 3.1f * hz.rate * t + hz.phase);
+        t += 1.f / sr;
+        return (s * 0.22f * press + chiff.bp * ch * 0.18f + wind.bp * 0.012f) * env.next() * (0.8f + 0.2f * vel);
+    }
+    bool finished() const { return env.idle(); }
+};
+DEFINE_INSTRUMENT(ChurchOrgan, ChurchOrganVoice, "Kirchenorgel", 19, 24, 0.348f, true)
+
+// Panflöte: fast reiner Sinus, viel hörbare Luft, kräftiger Anblas-"Puff", langsames, spätes Vibrato
+struct PanFluteVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1, ph = 0;
+    Humanize hz;
+    ADSR env;
+    SVF breath, puff;
+    Noise noise;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; ph = 0; hz.init(pitch); f *= centsToRatio(hz.cents);
+        env.attack = 0.05f; env.decay = 0.3f; env.sustain = 0.78f; env.release = 0.18f;
+        env.start(sr);
+        breath = SVF{}; puff = SVF{};
+        breath.set(std::min(f, 7000.f), 0.8f, sr);   // Luft genau um den Ton herum
+        puff.set(std::min(f * 2.5f, 9000.f), 0.3f, sr);
+        noise.seed(uint32_t(pitch * 40503 + 5));
+    }
+    void release() { env.noteOff(); }
+    float next() {
+        const float vibDepth = std::clamp((t - 0.4f) * 1.5f, 0.f, 1.f) * 12.f;
+        const float fr = f * centsToRatio(vibDepth * std::sin(kTwoPi * 4.6f * hz.rate * t + hz.phase)
+                                          - 18.f * std::exp(-t * 30.f));   // Ton "fällt" von unten hinein
+        const float tone = std::sin(kTwoPi * ph) + 0.08f * std::sin(2 * kTwoPi * ph) + 0.05f * std::sin(3 * kTwoPi * ph);
+        ph += fr / sr;
+        ph -= std::floor(ph);
+        const float n = noise.next();
+        breath.process(n);
+        puff.process(n);
+        const float p = t < 0.09f ? (1.f - t / 0.09f) : 0.f;
+        t += 1.f / sr;
+        const float e = env.next();
+        return (tone * 0.7f + breath.bp * 0.45f + puff.bp * p * 0.5f) * e * (0.45f + 0.55f * vel);
+    }
+    bool finished() const { return env.idle(); }
+};
+DEFINE_INSTRUMENT(PanFlute, PanFluteVoice, "Panflöte", 75, 12, 0.214f, true)
+
+// Ukulele: weiche Nylon-Saite, kleiner, mittiger Korpus
+DEFINE_INSTRUMENT(Ukulele, UkuleleVoice, "Ukulele", 24, 16, 0.757f, false)
+
+// Mandoline: Doppelsaiten (zwei leicht verstimmte Saiten pro Ton), und gehaltene Töne werden –
+// wie echte Mandolinenspieler es tun – mit schnellem Plektrum-Tremolo weitergespielt
+struct MandolinDuoVoice {
+    MandolinVoice a, b;
+    float sr = 48000, t = 0, vel = 1, nextTrem = 0.42f;
+    int k = 0;
+    bool held = true;
+    void start(int pitch, float v, float s) {
+        sr = s; vel = v; t = 0; held = true; k = 0; nextTrem = 0.42f;
+        a.start(pitch, v, s, -3.f);
+        b.start(pitch, v * 0.92f, s, 3.5f);
+    }
+    void release() { held = false; a.release(); b.release(); }
+    float next() {
+        if (held && t >= nextTrem) {   // ab hier: Tremolo (~13 Anschläge pro Sekunde, abwechselnd ab/auf)
+            const float amt = vel * ((k & 1) ? 0.55f : 0.7f);
+            a.excite(amt, 0.85f);
+            b.excite(amt * 0.9f, 0.85f);
+            ++k;
+            nextTrem += 1.f / 13.f;
+        }
+        t += 1.f / sr;
+        return (a.next() + b.next()) * 0.6f;
+    }
+    bool finished() const { return a.finished() && b.finished(); }
+};
+DEFINE_INSTRUMENT(Mandolin, MandolinDuoVoice, "Mandoline", 105, 16, 0.476f, false)
+
+// Banjo: helle Stahlsaite über einem Trommelfell – das Fell gibt den typischen "Twang"
+struct BanjoHeadVoice {
+    BanjoVoice core;
+    SVF head, twang;
+    float vel = 1.f, t = 0.f, sr = 48000.f;
+    void start(int pitch, float v, float s) {
+        sr = s; vel = v; t = 0.f;
+        core.start(pitch, v, s);
+        head = SVF{}; twang = SVF{};
+        head.set(520.f, 0.9f, s);
+        twang.set(2600.f, 0.75f, s);
+    }
+    void release() { core.release(); }
+    float next() {
+        const float x = core.next();
+        head.process(x);
+        twang.process(x);
+        t += 1.f / sr;
+        return x * 0.75f + head.bp * 0.35f + twang.bp * 0.4f * std::exp(-t * 6.f);
+    }
+    bool finished() const { return core.finished(); }
+};
+DEFINE_INSTRUMENT(Banjo, BanjoHeadVoice, "Banjo", 105, 16, 0.634f, false)
+
+// Steel Drum (Steelpan): jedes Feld ist auf Grundton, Oktave und Duodezime gestimmt; die Oktave
+// "blüht" kurz nach dem Anschlag auf – das macht den karibisch-singenden Klang
+struct SteelDrumVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    std::array<float, 4> ph{};
+    Decay a0, a1, a2, a3;
+    bool released = false;
+    float damp = 1.f, dampCoef = 1.f;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; ph.fill(0.f); released = false; damp = 1.f; dampCoef = 1.f;
+        const float T = std::clamp(2.2f - float(pitch - 60) * 0.03f, 0.8f, 2.6f);
+        a0.start(1.f, T, sr);
+        a1.start(0.55f, T * 0.7f, sr);
+        a2.start(0.25f, T * 0.45f, sr);
+        a3.start(0.12f * v, 0.05f, sr);   // Schlegel-Anschlag
+    }
+    void release() { released = true; dampCoef = std::exp(-1.f / (0.6f * sr / 4.6f)); }
+    float next() {
+        const float bloom = 1.f - std::exp(-t * 35.f);
+        static const float r[4] = {1.f, 2.003f, 2.997f, 4.6f};
+        const float lv[4] = {a0.next(), a1.next() * (0.5f + 0.9f * bloom), a2.next() * bloom, a3.next()};
+        float s = 0.f;
+        for (int i = 0; i < 4; ++i) {
+            if (f * r[i] > sr * 0.45f) continue;
+            s += std::sin(kTwoPi * ph[size_t(i)]) * lv[i];
+            ph[size_t(i)] += f * r[i] / sr;
+            ph[size_t(i)] -= std::floor(ph[size_t(i)]);
+        }
+        damp *= dampCoef;
+        t += 1.f / sr;
+        return s * damp * (0.35f + 0.65f * vel);
+    }
+    bool finished() const { return a0.value < 1e-4f || damp < 1e-4f; }
+};
+DEFINE_INSTRUMENT(SteelDrum, SteelDrumVoice, "Steel Drum", 114, 16, 0.19f, false)
+
+// Kalimba (Daumenklavier): Metallzunge auf Holzkasten – warmer Grundton, hoher unharmonischer
+// Zungen-Oberton, der schnell verschwindet, und ein kleiner "Plink" vom Daumen
+struct KalimbaVoice {
+    float sr = 48000, f = 440, t = 0, vel = 1;
+    std::array<float, 3> ph{};
+    Decay a0, a1, a2;
+    SVF box;
+    void start(int pitch, float v, float s) {
+        sr = s; f = midiToFreq(float(pitch)); vel = v; t = 0; ph.fill(0.f);
+        const float T = std::clamp(2.f - float(pitch - 60) * 0.03f, 0.7f, 2.4f);
+        a0.start(1.f, T, sr);
+        a1.start(0.35f * v, 0.12f, sr);
+        a2.start(0.18f * v, 0.03f, sr);
+        box = SVF{};
+        box.set(330.f, 0.85f, sr);
+    }
+    void release() {}
+    float next() {
+        static const float r[3] = {1.f, 5.95f, 14.1f};
+        const float lv[3] = {a0.next(), a1.next(), a2.next()};
+        float s = 0.f;
+        for (int i = 0; i < 3; ++i) {
+            if (f * r[i] > sr * 0.45f) continue;
+            s += std::sin(kTwoPi * ph[size_t(i)]) * lv[i];
+            ph[size_t(i)] += f * r[i] / sr;
+            ph[size_t(i)] -= std::floor(ph[size_t(i)]);
+        }
+        box.process(s);
+        t += 1.f / sr;
+        return (s + box.bp * 0.3f) * (0.35f + 0.65f * vel);
+    }
+    bool finished() const { return a0.value < 1e-4f; }
+};
+DEFINE_INSTRUMENT(Kalimba, KalimbaVoice, "Kalimba", 108, 16, 0.185f, false)
+
 
 #undef DEFINE_INSTRUMENT
 }   // namespace
@@ -856,4 +1425,23 @@ void registerSynths(InstrumentRegistry& reg) {
     reg.registerInstrument("Pauken", [] { return std::make_unique<Timpani>(); });
     reg.registerInstrument("Chor", [] { return std::make_unique<Choir>(); });
     reg.registerInstrument("Taiko", [] { return std::make_unique<Taiko>(); });
+    reg.registerInstrument("Piccolo", [] { return std::make_unique<Piccolo>(); });
+    reg.registerInstrument("Tuba", [] { return std::make_unique<Tuba>(); });
+    reg.registerInstrument("Saxofon", [] { return std::make_unique<AltoSax>(); });
+    reg.registerInstrument("Tenorsaxofon", [] { return std::make_unique<TenorSax>(); });
+    reg.registerInstrument("Mundharmonika", [] { return std::make_unique<Harmonica>(); });
+    reg.registerInstrument("Akkordeon", [] { return std::make_unique<Accordion>(); });
+    reg.registerInstrument("Cembalo", [] { return std::make_unique<Harpsichord>(); });
+    reg.registerInstrument("Celesta", [] { return std::make_unique<Celesta>(); });
+    reg.registerInstrument("Xylophon", [] { return std::make_unique<Xylophone>(); });
+    reg.registerInstrument("Vibraphon", [] { return std::make_unique<Vibraphone>(); });
+    reg.registerInstrument("Röhrenglocken", [] { return std::make_unique<TubularBells>(); });
+    reg.registerInstrument("E-Gitarre", [] { return std::make_unique<EGuitar>(); });
+    reg.registerInstrument("Kirchenorgel", [] { return std::make_unique<ChurchOrgan>(); });
+    reg.registerInstrument("Panflöte", [] { return std::make_unique<PanFlute>(); });
+    reg.registerInstrument("Ukulele", [] { return std::make_unique<Ukulele>(); });
+    reg.registerInstrument("Mandoline", [] { return std::make_unique<Mandolin>(); });
+    reg.registerInstrument("Banjo", [] { return std::make_unique<Banjo>(); });
+    reg.registerInstrument("Steel Drum", [] { return std::make_unique<SteelDrum>(); });
+    reg.registerInstrument("Kalimba", [] { return std::make_unique<Kalimba>(); });
 }

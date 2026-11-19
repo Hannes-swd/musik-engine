@@ -7,7 +7,8 @@
 
 namespace {
 // Reihenfolge der Zeilen (oben Becken, unten Bassdrum – wie in Drumcomputern)
-const int kRowOrder[] = {49, 57, 51, 53, 46, 42, 44, 50, 48, 47, 45, 43, 41, 39, 38, 40, 37, 36, 35, 54, 56, 70};
+const int kRowOrder[] = {49, 57, 51, 53, 46, 42, 44, 50, 48, 47, 45, 43, 41, 39, 38, 40, 37, 36, 35, 54, 56, 70,
+                         81, 80, 75, 76, 77, 52, 55, 63, 64, 62, 60, 61, 67, 68, 73, 74, 84};   // + Triangel, Claves, Holzblock, Gong, Becken-Wirbel, Congas, Bongos, Agogo, Guiro, Windspiel
 
 struct Pattern { const char* name; std::vector<std::pair<int, const char*>> rows; };
 const std::vector<Pattern>& patterns4() {

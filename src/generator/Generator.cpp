@@ -19,6 +19,8 @@
 #include "Generator.h"
 #include "analysis/Analyzer.h"
 #include "instruments/InstrumentRegistry.h"
+#include "audio/AudioEngine.h"
+#include "audio/Effects.h"
 #include "theory/Theory.h"
 
 #include <algorithm>
@@ -27,6 +29,7 @@
 #include <climits>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
@@ -370,7 +373,7 @@ struct MNote {
 using Motif = std::vector<MNote>;
 
 // Orchester-Stimmen (Partitur-Reihenfolge)
-enum Orch { FL, OB, CL, FG, HN, TP, TB, TI, PC, TK, GL, HP, CH, V1, V2, VA, VC, KB, PZ, OCOUNT };
+enum Orch { FL, OB, CL, FG, HN, TP, TB, TI, PC, TK, GL, HP, CH, V1, V2, VA, VC, KB, PZ, TU, PI, CB, OCOUNT };
 
 // Orchester-Techniken
 enum class Tex { Pad, Ostinato8, Ostinato16, Arpeggio, Tremolo, Pizz, Stabs, Chorale, Waltz, March, Count };
@@ -397,6 +400,12 @@ struct OrchPlan {
     bool taiko = false;             // Taiko-Ostinato
     bool brassChorale = false;      // Blechbläser-Choral (Posaunen, Hörner, Trompeten als Akkord)
     bool fanfare = false;           // Trompeten-Fanfare
+    // Spannung aufbauen / Ausrufezeichen
+    bool timpRoll = false;          // Paukenwirbel mit Crescendo in den Refrain
+    bool tremoloBuild = false;      // Streicher-Tremolo schwillt im letzten Takt an
+    bool brassSwell = false;        // Blech: leise ansetzen und anschwellen (fp<)
+    bool snareRoll = false;         // Trommelwirbel (Marsch) vor dem Refrain
+    bool accentHit = false;         // "Schicksalsschlag": Pauke + große Trommel + Becken auf der Eins
 };
 
 // ---------------------------------------------------------------------
@@ -530,7 +539,7 @@ const char* percTName(PercT t) {
 const char* orchInstName(int i) {
     static const char* n[] = {"Flöte", "Oboe", "Klarinette", "Fagott", "Hörner", "Trompeten", "Posaunen", "Pauken",
                               "Schlagwerk", "Taiko", "Glockenspiel", "Harfe", "Chor", "Violinen I", "Violinen II",
-                              "Bratschen", "Celli", "Kontrabässe", "Streicher pizz."};
+                              "Bratschen", "Celli", "Kontrabässe", "Streicher pizz.", "Tuba", "Piccolo", "Cembalo"};
     return n[std::clamp(i, 0, int(OCOUNT) - 1)];
 }
 
@@ -625,6 +634,23 @@ private:
 
     // --- Schlagzeug ---
     void genDrums(const Material& m, const SecDef& sd, size_t k, Tick secStart, float vel, std::vector<Note>& out);
+    bool bigFinale_ = false;   // Orchester: Paukenwirbel + Schluss-Schlag am Ende
+    static bool isInst(const std::string& a, std::initializer_list<const char*> l) {
+        for (const char* x : l) if (a == x) return true;
+        return false;
+    }
+    bool islandSong() const {   // Insel-/Latin-Klangfarben -> Hand-Percussion passt immer
+        return isInst(s_.melodyInstrument, {"Steel Drum", "Marimba", "Ukulele", "Kalimba", "Panflöte"}) ||
+               isInst(s_.chordInstrument, {"Ukulele", "Steel Drum", "Marimba"});
+    }
+    bool handPerc(const Material& m) const {
+        return bpb_ == 4 && (islandSong() || m.rhySys == RhySys::Tresillo || m.rhySys == RhySys::Clave ||
+                             m.rhySys == RhySys::Bossa || m.rhySys == RhySys::Offbeat);
+    }
+    bool sparkleSong() const {
+        return isInst(s_.melodyInstrument, {"Glocken", "Celesta", "Kalimba", "Harfe", "Vibraphon"}) ||
+               isInst(s_.chordInstrument, {"Harfe", "Celesta", "Glocken"});
+    }
 
     // --- Begleitung ---
     std::vector<int> voice(const Chord& c);
@@ -1551,6 +1577,17 @@ void Builder::planOrchestra(Material& m, Sec t, float e) {
                          (t == Sec::Chorus && e >= 0.72f && chance(r_, 0.3f));
         o.fanfare = (t == Sec::Chorus || t == Sec::Intro) && e >= 0.7f && chance(r_, 0.35f);
     }
+    {
+        // Spannungs-Techniken: je dramatischer der Stil, desto öfter
+        const std::string nm = P.name;
+        const bool dramatic = nm == "Episch (Film)" || nm == "Marsch / Heroisch" || nm == "Mysteriös" || epic_;
+        const bool builds = t == Sec::Pre || t == Sec::Bridge || t == Sec::Intro || t == Sec::Verse;
+        o.timpRoll = builds && chance(r_, dramatic ? 0.65f : nm == "Romantisch" ? 0.4f : 0.22f);
+        o.tremoloBuild = builds && nm != "Barock / Kammer" && chance(r_, dramatic ? 0.5f : 0.3f);
+        o.brassSwell = P.brass && (t == Sec::Pre || t == Sec::Bridge) && chance(r_, dramatic ? 0.5f : 0.3f);
+        o.snareRoll = nm == "Marsch / Heroisch" && builds && chance(r_, 0.6f);
+        o.accentHit = t == Sec::Chorus && chance(r_, dramatic ? 0.85f : nm == "Minimal" || nm == "Pastoral" ? 0.25f : 0.5f);
+    }
 
     // Epische Mittel: Chor, Braams (tiefes Blech), Taiko – je nach Stil unterschiedlich wahrscheinlich
     const std::string sname = P.name;
@@ -1586,6 +1623,11 @@ std::vector<std::string> Builder::orchInfo() const {
         if (o.taiko) s += ", Taiko-Ostinato";
         if (o.brassChorale) s += ", Blechbläser-Choral";
         if (o.fanfare) s += ", Trompeten-Fanfare";
+        if (o.timpRoll) s += ", Paukenwirbel";
+        if (o.tremoloBuild) s += ", Tremolo-Crescendo";
+        if (o.brassSwell) s += ", Blech-Anschwellen";
+        if (o.snareRoll) s += ", Trommelwirbel";
+        if (o.accentHit) s += ", Schicksalsschlag";
         out.push_back(s);
     }
     return out;
@@ -1597,7 +1639,7 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
     // Spielbare Tonumfänge der Register (MIDI)
     static const int range[OCOUNT][2] = {{60, 96}, {58, 91}, {50, 89}, {34, 72}, {41, 77}, {55, 82}, {40, 72},
                                          {38, 55}, {0, 127}, {0, 127}, {72, 105}, {24, 100}, {48, 81}, {55, 100},
-                                         {55, 93}, {48, 84}, {36, 76}, {28, 60}, {36, 88}};
+                                         {55, 93}, {48, 84}, {36, 76}, {28, 60}, {36, 88}, {26, 58}, {74, 105}, {41, 89}};
     const OrchPlan& P = m.orch;
     const OrchProfile& prof = orchProfiles()[size_t(rs_.orchStyle)];
     const std::string style = prof.name;
@@ -2035,6 +2077,99 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
             add(HP, mel_.pitch(d0 + i), secStart + secLen - 2 * beat_ + i * step, step * 2, vel * (0.4f + 0.4f * float(i) / float(n)));
     }
 
+    // ---------- 6a. Spannung aufbauen (vor dem Refrain) und Ausrufezeichen ----------
+    {
+        const Tick secEnd = secStart + secLen;
+        if (nextChorus && P.timpRoll) {   // Paukenwirbel: immer dichter und lauter hinein in den Refrain
+            const Tick len = (sd.bars >= 4 && chance(r_, 0.5f) ? 2 : 1) * bar_;
+            const Tick st0 = std::max(secStart, secEnd - len);
+            const int pitch = timp(chordAt(tc, secLen - six_).root);
+            for (Tick tt = st0; tt < secEnd; tt += six_ / 2) {   // 32tel-Schläge, abwechselnd links/rechts
+                const float prog = float(tt - st0) / float(std::max<Tick>(1, secEnd - st0));
+                const float alt = ((tt - st0) / (six_ / 2)) % 2 ? 0.92f : 1.f;
+                timpHit(pitch, tt, vel * (0.1f + 0.7f * prog * prog) * alt);
+            }
+        }
+        if (nextChorus && P.snareRoll) {   // Trommelwirbel (Marsch): Snare in 32teln, Crescendo
+            const Tick st0 = std::max(secStart, secEnd - bar_);
+            for (Tick tt = st0; tt < secEnd; tt += six_ / 2) {
+                const float prog = float(tt - st0) / float(std::max<Tick>(1, secEnd - st0));
+                perc(38, tt, vel * (0.15f + 0.6f * prog));
+            }
+        }
+        if (nextChorus && P.tremoloBuild) {   // Streicher-Tremolo schwillt im letzten Takt an
+            const Tick st0 = std::max(secStart, secEnd - bar_);
+            for (Tick tt = st0; tt < secEnd; tt += six_) {
+                const float prog = float(tt - st0) / float(std::max<Tick>(1, secEnd - st0));
+                const auto v = voice(chordAt(tc, tt - secStart));
+                const int tracks3[3] = {VA, V2, V1};
+                for (size_t j = 0; j < v.size() && j < 3; ++j)
+                    add(tracks3[j], v[j] + (j == 2 ? 12 : 0), tt, six_ - six_ / 8, vel * (0.15f + 0.65f * prog));
+            }
+        }
+        if (nextChorus && brass && P.brassSwell) {   // Blech: leise ansetzen, anschwellen (Hörner + Posaunen)
+            const Tick st0 = std::max(secStart, secEnd - bar_);
+            const Chord& ch = chordAt(tc, secLen - six_);
+            int root = 40;
+            while (mod12(root) != ch.root) ++root;
+            const int fifth = ch.intervals.size() > 2 ? ch.intervals[2] : 7;
+            const int third = ch.intervals.size() > 1 ? ch.intervals[1] : 4;
+            // als Folge immer lauterer, überlappender Töne (die Lautstärke-Automation glättet das)
+            for (int step = 0; step < 4; ++step) {
+                const Tick tt = st0 + (secEnd - st0) * step / 4;
+                const float v = vel * (0.2f + 0.18f * float(step));
+                add(TB, root, tt, (secEnd - st0) / 4, v);
+                add(HN, root + 12 + third, tt, (secEnd - st0) / 4, v);
+                add(HN, root + 12 + fifth, tt, (secEnd - st0) / 4, v);
+            }
+        }
+        if (sd.type == Sec::Chorus && P.accentHit) {   // "Schicksalsschlag": alles auf die Eins
+            const int root = tc.front().chord.root;
+            timpHit(timp(root), secStart, std::min(1.f, vel * 1.3f));
+            perc(35, secStart, std::min(1.f, vel * 1.2f));   // große Trommel
+            perc(49, secStart, vel * 0.85f);                 // Becken
+        }
+        // Großes Finale: Paukenwirbel über den letzten Takt (meist die Dominante) – der große Schlag mit
+        // Pauke, großer Trommel und Becken fällt dann auf die Eins des Schlussakkords (siehe "Schlusstakt")
+        if (k + 1 == st.size() && sd.bars >= 2 && bpb_ >= 3 && !sd.fade &&
+            (epic_ || style == "Episch (Film)" || style == "Marsch / Heroisch" || style == "Romantisch" || style == "Mysteriös")) {
+            const Tick st0 = std::max(secStart, secEnd - bar_);
+            const int pitch = timp(chordAt(tc, secLen - six_).root);
+            for (Tick tt = st0; tt < secEnd; tt += six_ / 2) {
+                const float prog = float(tt - st0) / float(std::max<Tick>(1, secEnd - st0));
+                timpHit(pitch, tt, vel * (0.15f + 0.65f * prog * prog) * (((tt - st0) / (six_ / 2)) % 2 ? 0.92f : 1.f));
+            }
+            bigFinale_ = true;
+        }
+    }
+
+    // ---------- 6b. Weitere Farben: Triangel, Piccolo, Tuba, Cembalo, Gong ----------
+    bool lastCh = sd.type == Sec::Chorus;
+    for (size_t j = k + 1; j < st.size() && lastCh; ++j) if (st[j].type == Sec::Chorus) lastCh = false;
+    if (P.sparkle && sd.type == Sec::Chorus)   // Triangel: helles "Ting" auf den Takt-Einsen
+        for (int b = 0; b < sd.bars; ++b) {
+            perc(81, secStart + Tick(b) * bar_, vel * 0.5f);
+            if (bpb_ == 4 && b % 2 == 1) perc(80, secStart + Tick(b) * bar_ + 2 * beat_, vel * 0.35f);
+        }
+    if (sd.type == Sec::Chorus && e >= 0.78f && (style == "Episch (Film)" || style == "Marsch / Heroisch"))   // Piccolo: Melodie eine Oktave höher
+        for (auto& n : mel)
+            if (n.length >= 2 * six_) put(PI, n, 12, 0.45f);
+    if (brass && (P.brassChorale || (sd.type == Sec::Chorus && e >= 0.72f)))   // Tuba: Fundament unter dem Blech
+        for (auto& n : bass) put(TU, n, n.pitch >= 46 ? -12 : 0, 0.7f);
+    if (style == "Barock / Kammer" && sd.type != Sec::Outro)   // Cembalo: Generalbass-Akkorde (Continuo) auf jedem Schlag
+        for (auto& c : tc) {
+            const auto v = voice(c.chord);
+            for (Tick bo = 0; bo < c.len; bo += beat_)
+                for (int p : v) add(CB, p, secStart + c.start + bo, eighth, vel * ((c.start + bo) % bar_ == 0 ? 0.55f : 0.42f));
+        }
+    if ((epic_ || style == "Mysteriös") && lastCh && k > 0) {   // Becken-Wirbel hinein, Gong auf die Eins des letzten Refrains
+        const Tick roll = Tick(1.8 * rs_.bpm / 60.0 * double(song_.ppq));
+        if (secStart > roll) perc(55, secStart - roll, vel * 0.8f);
+        perc(52, secStart, vel * 0.9f);
+    }
+    if (P.sparkle && (sd.type == Sec::Bridge || (sd.type == Sec::Intro && k == 0)) && !epic_)   // Windspiel: Glitzern zu Beginn
+        perc(84, secStart, vel * 0.6f);
+
     // ---------- 7. Epische Mittel ----------
     if (P.braams)   // tiefes Blech fortissimo – mit jedem Akkord neu, nur Akkordtöne (Grundton, Quinte, Oktave)
         for (auto& c : tc) {
@@ -2401,6 +2536,29 @@ void Builder::genDrums(const Material& m, const SecDef& sd, size_t k, Tick secSt
                     hit(SNARE, t, vel * 0.18f);
             }
         }
+
+        // Hand-Percussion: bei lateinamerikanischen/karibischen Rhythmen (oder Insel-Instrumenten)
+        // spielen Congas (Tumbao), Bongos (Martillo), Shaker und im Refrain eine Agogo-Glocke mit
+        if (handPerc(m) && style != D::Jazz && style != D::Epic) {
+            const bool full = sd.type == Sec::Chorus || e > 0.65f;
+            const bool soft = sd.type == Sec::Intro || sd.type == Sec::Outro || m.drumsLight;
+            const float pv = vel * (soft ? 0.6f : 1.f);
+            for (int s = 0; s < fillFrom; ++s) {
+                const Tick t = bo + Tick(s) * six_;
+                const int s16 = s % 16;
+                if (s % 2 == 0 || full) hit(70, t, pv * (s % 4 == 2 ? 0.42f : s % 2 ? 0.2f : 0.28f));   // Shaker
+                if (soft) continue;
+                if (s16 == 4) hit(62, t, pv * 0.62f);                                   // Conga-Slap
+                if (s16 == 7) hit(63, t, pv * 0.4f);
+                if (s16 == 12 || s16 == 14) hit(s16 == 12 ? 63 : 64, t, pv * 0.6f);   // offene Töne
+                if (full && s % 2 == 0) hit(s16 == 6 || s16 == 14 ? 61 : 60, t, pv * (s16 % 4 == 0 ? 0.42f : 0.3f));   // Bongos
+                if (full && e > 0.6f && (s16 == 0 || s16 == 3 || s16 == 6 || s16 == 10 || s16 == 12))
+                    hit(s16 == 3 || s16 == 10 ? 68 : 67, t, pv * 0.35f);              // Agogo
+            }
+        }
+        // Windspiel als Glitzer zu Beginn ruhiger Teile, wenn die Melodie "funkelt"
+        if (b == 0 && (sd.type == Sec::Intro || sd.type == Sec::Bridge) && sparkleSong())
+            hit(84, bo, vel * 0.55f);
 
         // Steigerung im Pre-Refrain: Snare-Achtel mit Crescendo
         if (sd.type == Sec::Pre && lastBar && fillFrom == steps)
@@ -3291,9 +3449,9 @@ Song Builder::build() {
     if (orch) {
         static const char* inst[OCOUNT] = {"Flöte", "Oboe", "Klarinette", "Fagott", "Hörner", "Trompeten", "Posaunen",
                                            "Pauken", "Schlagzeug", "Taiko", "Glocken", "Harfe", "Chor", "Violinen", "Violinen",
-                                           "Bratschen", "Celli", "Kontrabässe", "Pizzicato"};
+                                           "Bratschen", "Celli", "Kontrabässe", "Pizzicato", "Tuba", "Piccolo", "Cembalo"};
         static const float vol[OCOUNT] = {0.7f, 0.7f, 0.7f, 0.6f, 0.6f, 0.55f, 0.55f, 0.8f, 0.6f, 0.75f,
-                                          0.45f, 0.65f, 0.6f, 0.85f, 0.6f, 0.55f, 0.7f, 0.7f, 0.65f};
+                                          0.45f, 0.65f, 0.6f, 0.85f, 0.6f, 0.55f, 0.7f, 0.7f, 0.65f, 0.6f, 0.45f, 0.55f};
         chordSustains_ = true;
         orch_.clear();
         for (int i = 0; i < OCOUNT; ++i) {
@@ -3456,7 +3614,11 @@ Song Builder::build() {
             orch_[TB].notes.push_back({b + 12 + transpose, cursor, len, 0.5f});
             int tp = 41;
             while (mod12(tp) != mod12(t.root + transpose)) ++tp;
-            orch_[TI].notes.push_back({tp, cursor, beat_, 0.9f});
+            orch_[TI].notes.push_back({tp, cursor, beat_, bigFinale_ ? 1.f : 0.9f});
+            if (bigFinale_) {   // der letzte große Schlag: große Trommel + Becken mit der Pauke
+                orch_[PC].notes.push_back({35, cursor, six_, 1.f});
+                orch_[PC].notes.push_back({49, cursor, six_, 0.9f});
+            }
             if (s_.withMelody && lastMelDeg_ != INT_MIN) {
                 int best = lastMelDeg_, bestD = 99;
                 for (int d = lastMelDeg_ - 4; d <= lastMelDeg_ + 4; ++d)
@@ -3733,6 +3895,10 @@ void Builder::applyDynamics() {
     }
     for (size_t k = 0; k < n; ++k)   // Ausblenden: bis fast zur Stille
         if (st[k].fade) i1[k] = 0.03f;
+    if (bigFinale_ && n > 0 && !st[n - 1].fade) {   // großes Finale: zum Schluss anschwellen statt verklingen
+        i0[n - 1] = std::max(i0[n - 1], 0.6f);
+        i1[n - 1] = std::max(i1[n - 1], 0.98f);
+    }
     auto secOf = [&](Tick t) {
         size_t k = 0;
         while (k + 1 < n && t >= song_.sections[k + 1].start) ++k;
@@ -3768,7 +3934,7 @@ void Builder::applyDynamics() {
     // ---- 3. Lautstärke-Automation pro Spur – jede Stimme nach ihrer Rolle im Abschnitt ----
     const Tick songEnd = song_.length();
     const bool orch = s_.ensemble == Ensemble::Orchestra;
-    enum Role { RMel, RDouble, RCounter, RHarm, RBass, RPerc };
+    enum Role { RMel, RDouble, RCounter, RHarm, RBass, RPerc, RSparkle };
     auto orchIndex = [&](const std::string& name) {
         for (int i = 0; i < OCOUNT; ++i) if (name == orchInstName(i)) return i;
         return -1;
@@ -3807,11 +3973,15 @@ void Builder::applyDynamics() {
         for (size_t k = 0; k < n; ++k) {
             if (drum || oi == TI) { role[k] = RPerc; continue; }
             if (!orch) {
-                role[k] = (tr.name == "Melodie" || tr.name == "Solo") ? RMel : tr.name == "Bass" ? RBass : RHarm;
+                role[k] = (tr.name == "Melodie" || tr.name == "Solo") ? RMel : tr.name == "Bass" ? RBass
+                        : tr.name == "Zweite Stimme" ? RCounter : RHarm;
                 continue;
             }
             const OrchPlan& o = mats_[st[k].type].orch;
             const bool hasMel = mats_[st[k].type].melody;
+            if (oi == GL) { role[k] = RSparkle; continue; }   // Glockenspiel: Glanz, nicht Hauptsache
+            if (oi == PI) { role[k] = RDouble; continue; }    // Piccolo verdoppelt die Melodie
+            if (oi == TU) { role[k] = RBass; continue; }
             if (hasMel && oi == o.lead) role[k] = RMel;
             else if (hasMel && o.mel == MelT::CallResponse && oi == o.second) role[k] = RMel;
             else if (hasMel && o.mel == MelT::Unison && (oi == V1 || oi == V2 || oi == VA || oi == VC || oi == HN)) role[k] = RDouble;
@@ -3842,9 +4012,14 @@ void Builder::applyDynamics() {
             case RCounter: g = 0.3f + 0.65f * I; break;
             case RBass: g = 0.42f + 0.58f * I; break;
             case RPerc: g = 0.32f + 0.88f * I; break;
+            case RSparkle: g = 0.12f + 0.5f * I; break;   // leise in ruhigen Teilen, präsenter an Höhepunkten
             default: g = 0.26f + 0.76f * I; break;
             }
             if (brassHarm && role[k] == RHarm && I < 0.65f) g *= 0.8f;   // Blech hält sich bis zum Höhepunkt zurück
+            if (orch) {   // Rollen-Mix: die Melodie führt, Verdopplungen/Gegenstimmen dahinter, Begleitung und Glanz weiter hinten
+                static const float roleGain[] = {1.f, 0.62f, 0.55f, 0.45f, 0.6f, 0.7f, 0.5f};
+                g *= roleGain[int(role[k])] * 1.45f;   // 1,45: Gesamtlautstärke ungefähr wie vorher
+            }
             if (!melSpans[k].empty()) {
                 const bool sounding = melodySounds(k, t);
                 if (role[k] == RHarm) g *= sounding ? 0.88f : 1.06f;        // der Melodie ausweichen, Lücken füllen
@@ -4199,6 +4374,115 @@ const std::vector<RoomDef>& roomDefs() {
     return r;
 }
 
+// ---------------------------------------------------------------------
+//  Automatischer Pegelabgleich (Band) – wie ein Toningenieur:
+//  hört sich jede Spur im letzten Refrain einzeln an (wahrgenommene Lautheit, K-gewichtet) und stellt ihre
+//  Lautstärke so ein, dass jede Rolle ihren festen Abstand zur Melodie hat (Bass -4,5 dB, Begleitung -7 dB …).
+//  Die Instrumente selbst sind auf gleiche wahrgenommene Lautheit kalibriert.
+// ---------------------------------------------------------------------
+// Wahrgenommene Lautheit eines Stereo-Puffers (K-Gewichtung wie bei LUFS), in dB
+double perceivedLevel(const std::vector<float>& s, float sr) {
+    Biquad hp, sh;
+    hp.highpass(60.f, 0.5f, sr);
+    sh.shelf(true, 1500.f, 4.f, sr);
+    double sum = 0;
+    size_t n = 0;
+    for (size_t i = 0; i + 1 < s.size(); i += 2) {
+        float l = s[i], r = s[i + 1];
+        hp.process(l, r);
+        sh.process(l, r);
+        sum += double(l) * l + double(r) * r;
+        ++n;
+    }
+    return 10.0 * std::log10(std::max(1e-12, sum / double(std::max<size_t>(1, n))));
+}
+
+// Eine Spur allein (mit ihrer Lautstärke und Dynamik-Automation) in einem Zeitfenster anhören und messen
+double trackLevel(const Song& song, size_t track, Tick a, Tick b) {
+    Song solo;
+    solo.bpm = song.bpm;
+    solo.ppq = song.ppq;
+    solo.beatsPerBar = song.beatsPerBar;
+    solo.beatUnit = song.beatUnit;
+    solo.fx.on = false;
+    solo.fx.mastering = false;
+    Track t = song.tracks[track];
+    t.muted = false;
+    t.solo = false;
+    t.notes.erase(std::remove_if(t.notes.begin(), t.notes.end(), [&](const Note& n) { return n.end() <= a || n.start >= b; }),
+                  t.notes.end());
+    if (t.notes.empty()) return -200;
+    solo.tracks.push_back(t);
+    AudioEngine e;
+    e.loadSong(solo);
+    const float sr = 32000.f;   // reicht für eine Lautheitsmessung und spart Zeit
+    return perceivedLevel(e.renderRange(double(a), double(b), int(sr)), sr);
+}
+
+void balanceBand(Song& song) {
+    if (song.tracks.empty() || song.sections.empty()) return;
+    // Messfenster: der letzte Refrain (dort spielen fast alle Stimmen zusammen), sonst der Abschnitt mit den meisten Spuren
+    auto active = [&](size_t i, Tick a, Tick b) {
+        for (auto& n : song.tracks[i].notes) if (n.start < b && n.end() > a) return true;
+        return false;
+    };
+    int win = -1, bestCount = -1;
+    for (int k = int(song.sections.size()) - 1; k >= 0; --k) {
+        const auto& sec = song.sections[size_t(k)];
+        int cnt = 0;
+        for (size_t i = 0; i < song.tracks.size(); ++i) cnt += active(i, sec.start, sec.start + sec.length);
+        const bool chorus = sec.name.rfind("Refrain", 0) == 0 && sec.name.find("Breakdown") == std::string::npos;
+        if (chorus && win < 0) { win = k; bestCount = cnt; break; }
+        if (cnt > bestCount) { bestCount = cnt; win = k; }
+    }
+    if (win < 0) return;
+    const Tick wa = song.sections[size_t(win)].start, wb = wa + std::min<Tick>(song.sections[size_t(win)].length, 16 * song.ticksPerBar());
+    size_t melIdx = song.tracks.size();
+    for (size_t i = 0; i < song.tracks.size(); ++i) if (song.tracks[i].name == "Melodie") melIdx = i;
+    if (melIdx == song.tracks.size()) return;
+    std::map<std::pair<Tick, Tick>, double> melCache;
+    auto melodyIn = [&](Tick a, Tick b) {
+        auto key = std::make_pair(a, b);
+        auto it = melCache.find(key);
+        if (it != melCache.end()) return it->second;
+        const double v = trackLevel(song, melIdx, a, b);
+        melCache[key] = v;
+        return v;
+    };
+    const double melRef = melodyIn(wa, wb);
+    if (melRef < -150) return;
+    for (size_t i = 0; i < song.tracks.size(); ++i) {
+        Track& t = song.tracks[i];
+        if (i == melIdx || t.notes.empty()) continue;
+        auto inst = InstrumentRegistry::instance().create(t.instrument);
+        const bool sus = inst && inst->sustains();
+        float target;   // gewünschter Abstand zur Melodie (dB), wie in einer guten Popmischung
+        if (t.name == "Solo") target = 0.f;
+        else if (t.name == "Bass") target = -4.5f;
+        else if (t.name == "Begleitung") target = sus ? -8.f : -7.f;
+        else if (t.name == "Schlagzeug") target = -3.5f;
+        else if (t.name == "Zweite Stimme") target = -9.f;
+        else if (t.name == "Streicher-Linie") target = -10.f;
+        else target = -8.f;
+        // im Fenster messen; spielt die Spur dort nicht, dann in ihrem eigenen ersten Abschnitt
+        Tick a = wa, b = wb;
+        if (!active(i, wa, wb)) {
+            const Tick first = t.notes.front().start;
+            for (auto& sec : song.sections)
+                if (first >= sec.start && first < sec.start + sec.length) {
+                    a = sec.start;
+                    b = sec.start + std::min<Tick>(sec.length, 16 * song.ticksPerBar());
+                }
+        }
+        const double lvl = trackLevel(song, i, a, b);
+        if (lvl < -150) continue;
+        double ref = melodyIn(a, b);
+        if (ref < -150) ref = melRef;   // Melodie pausiert dort (z.B. beim Solo): mit ihrem Refrain-Pegel vergleichen
+        const double diff = lvl - ref;
+        t.volume = std::clamp(t.volume * std::pow(10.f, (target - float(diff)) / 20.f), 0.05f, 1.4f);
+    }
+}
+
 // Raum passend zur Musik wählen und jeder Spur ihren Hall-/Echo-Anteil nach ihrer Rolle geben
 void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
     const bool orch = s.ensemble == Ensemble::Orchestra;
@@ -4208,6 +4492,8 @@ void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
     if (room <= 0 || room >= int(roomDefs().size())) {
         if (orch) {
             room = (style == "Episch (Film)" || style == "Mysteriös") ? 5 : style == "Barock / Kammer" ? 3 : 4;
+        } else if (s.melodyInstrument == "Kirchenorgel" || s.chordInstrument == "Kirchenorgel") {
+            room = 5;   // Orgel gehört in die Kathedrale
         } else if (!s.withDrums && s.accompaniment == AccompStyle::Pad && rs.bpm < 85) {
             room = 6;   // schwebend, Weltraum
         } else if (rs.drumStyle == DrumStyle::Jazz || (s.groove == 1 && s.swing > 0.3f)) {
@@ -4236,7 +4522,7 @@ void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
             else if (n == "Begleitung") {
                 auto inst = InstrumentRegistry::instance().create(t.instrument);
                 rev = (inst && inst->sustains()) ? 0.3f : 0.22f;
-            } else if (n == "Bass") rev = 0.03f;
+            } else if (n == "Bass") rev = t.instrument == "Kirchenorgel" ? 0.3f : 0.03f;
             else if (n == "Schlagzeug") rev = 0.1f;
         } else {
             auto has = [&](const char* p) { return n.find(p) != std::string::npos; };
@@ -4252,10 +4538,14 @@ void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
             else if (has("Glocken")) rev = 0.4f;
             else if (has("Harfe")) rev = 0.38f;
             else if (has("Chor")) rev = 0.42f;
+            else if (has("Tuba")) rev = 0.18f;
+            else if (has("Piccolo")) rev = 0.3f;
+            else if (has("Cembalo")) rev = 0.22f;
         }
         t.reverb = rev;
         t.delay = del;
     }
+    if (!orch) balanceBand(song);
 }
 }
 

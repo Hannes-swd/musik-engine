@@ -54,6 +54,13 @@ const PresetDef kPresets[] = {
     {"Barock", "Orchester im Barock-/Kammerstil: Dorisch/Moll, gleichmäßiger Akkordwechsel, Terrassendynamik."},
     {"Western", "Mixolydisch oder Moll, Gitarren-Rhythmus, weite Sprünge, bVII-Akkorde."},
     {"Sommer-Pop", "Marimba, Gitarre, synkopiert und sonnig, sehr eingängig."},
+    {"Rock", "Verzerrte E-Gitarren-Akkorde, treibendes Schlagzeug, Gitarren-Solo."},
+    {"Paris (Musette)", "Akkordeon im Walzertakt, Gitarre und Kontrabass - wie im Café."},
+    {"Karibik", "Steel Drum und Ukulele, Offbeat-Groove mit Congas, Bongos und Shaker."},
+    {"Bluegrass", "Banjo-Melodie, Mandolinen-Tremolo, Gitarre und Kontrabass - schnell und fröhlich."},
+    {"Kirche / Feierlich", "Kirchenorgel mit Chor, langsam und erhaben, ohne Schlagzeug."},
+    {"Anden", "Panflöte über Gitarre und Mandoline, Moll-Pentatonik, sehnsuchtsvoll."},
+    {"Traumland", "Kalimba und Harfe, laid-back Groove, warm und verträumt."},
     {"Zufall", "Würfelt alle Regler, Instrumente und Besetzung neu."},
 };
 constexpr int kPresetCount = int(sizeof(kPresets) / sizeof(kPresets[0]));
@@ -318,8 +325,8 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.scale = int(ScaleType::Dorian); bpm = 112; s.melodyDensity = 0.55f; s.syncopation = 0.6f;
         s.energy = 0.55f; s.creativity = 0.7f; s.bass = BassStyle::Walking; s.drums = DrumStyle::Jazz;
         s.swing = 0.7f; s.jazzChords = 0.9f; s.colorChords = 0.6f; s.leaps = 0.6f; s.ambitus = 0.6f;
-        s.repetition = 0.35f; s.humanize = 0.45f; s.solo = true; s.soloInstrument = "E-Piano"; s.groove = 1; s.grooveAmount = 0.4f;
-        inst("Piano", "E-Piano", "Kontrabass");
+        s.repetition = 0.35f; s.humanize = 0.45f; s.solo = true; s.soloInstrument = "Vibraphon"; s.groove = 1; s.grooveAmount = 0.4f;
+        inst("Saxofon", "Piano", "Kontrabass");   // Sax-Melodie, Vibraphon-Solo
         break;
     case 5:   // Orchester (filmisch)
         s.scale = either(ScaleType::NaturalMinor, ScaleType::Major, 0.66f); bpm = 84;
@@ -376,7 +383,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.melodyDensity = 0.5f; s.syncopation = 0.15f; s.energy = 0.4f; s.creativity = 0.45f;
         s.withDrums = false; s.accompaniment = AccompStyle::Arpeggio;
         s.colorChords = 0.4f; s.jazzChords = 0.15f; s.ambitus = 0.65f; s.leaps = 0.55f; s.dynamicRange = 0.6f;
-        inst("Glocken", "Harfe", "Pizzicato");
+        inst("Celesta", "Harfe", "Pizzicato");
         break;
     case 13:  // Heldenhaft (Marsch)
         s.scale = int(ScaleType::Major); bpm = 112;
@@ -403,7 +410,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.melodyDensity = 0.55f; s.syncopation = 0.15f; s.energy = 0.5f; s.creativity = 0.3f;
         s.drums = DrumStyle::Ballad; s.swing = 0.3f;
         s.jazzChords = 0.35f; s.colorChords = 0.4f; s.repetition = 0.7f; s.ambitus = 0.55f;
-        inst("Glocken", "Piano", "Kontrabass");
+        inst("Celesta", "Piano", "Kontrabass");
         break;
     case 17:  // Barock / Mittelalter
         s.scale = either(ScaleType::Dorian, ScaleType::NaturalMinor, 0.5f); bpm = 100;
@@ -418,7 +425,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.drums = DrumStyle::Pop; s.swing = 0.25f; s.accompaniment = AccompStyle::Rhythm; s.bass = BassStyle::RootFifth;
         s.colorChords = 0.45f; s.jazzChords = 0.f; s.leaps = 0.65f; s.ambitus = 0.75f;
         s.solo = true; s.soloInstrument = "Gitarre";
-        inst("Lead", "Gitarre", "Kontrabass");
+        inst("Mundharmonika", "Gitarre", "Kontrabass");
         break;
     case 19:  // Sommer-Pop
         s.scale = either(ScaleType::Major, ScaleType::MajorPentatonic, 0.7f); bpm = 108;
@@ -427,6 +434,63 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.repetition = 0.75f; s.ambitus = 0.45f; s.leaps = 0.4f; s.jazzChords = 0.2f; s.colorChords = 0.15f;
         s.groove = 2; s.grooveAmount = 0.35f;
         inst("Marimba", "Gitarre", "Synth-Bass");
+        break;
+    case 20:  // Rock
+        s.scale = either(ScaleType::NaturalMinor, ScaleType::Mixolydian, 0.6f); bpm = 128;
+        s.melodyDensity = 0.5f; s.syncopation = 0.35f; s.energy = 0.88f; s.creativity = 0.3f;
+        s.drums = DrumStyle::Rock; s.accompaniment = AccompStyle::Rhythm; s.bass = BassStyle::Eighths;
+        s.repetition = 0.7f; s.leaps = 0.5f; s.dynamicRange = 0.55f; s.jazzChords = 0.f; s.colorChords = 0.25f;
+        s.solo = true; s.soloInstrument = "E-Gitarre"; s.groove = 2; s.grooveAmount = 0.3f;
+        inst("Lead", "E-Gitarre", "Synth-Bass");
+        break;
+    case 21:  // Paris (Musette)
+        s.scale = either(ScaleType::HarmonicMinor, ScaleType::Major, 0.55f); bpm = 168; meter = 1;
+        s.melodyDensity = 0.6f; s.syncopation = 0.1f; s.energy = 0.55f; s.creativity = 0.35f;
+        s.withDrums = false; s.accompaniment = AccompStyle::Broken; s.bass = BassStyle::RootFifth;
+        s.jazzChords = 0.3f; s.colorChords = 0.35f; s.leaps = 0.45f; s.repetition = 0.6f; s.dynamicRange = 0.5f;
+        s.swing = 0.2f;
+        inst("Akkordeon", "Gitarre", "Kontrabass");
+        break;
+    case 22:  // Karibik
+        s.scale = either(ScaleType::Major, ScaleType::MajorPentatonic, 0.6f); bpm = 104;
+        s.melodyDensity = 0.55f; s.syncopation = 0.6f; s.energy = 0.62f; s.creativity = 0.3f;
+        s.drums = DrumStyle::Pop; s.accompaniment = AccompStyle::Rhythm; s.bass = BassStyle::Syncopated;
+        s.repetition = 0.72f; s.ambitus = 0.5f; s.leaps = 0.4f; s.jazzChords = 0.15f; s.colorChords = 0.2f;
+        s.groove = 1; s.grooveAmount = 0.4f; s.solo = coin(0.4f); s.soloInstrument = "Marimba";
+        inst("Steel Drum", "Ukulele", "Synth-Bass");
+        break;
+    case 23:  // Bluegrass
+        s.scale = either(ScaleType::Major, ScaleType::Mixolydian, 0.65f); bpm = 150;
+        s.melodyDensity = 0.75f; s.syncopation = 0.2f; s.energy = 0.72f; s.creativity = 0.3f;
+        s.drums = DrumStyle::Pop; s.accompaniment = AccompStyle::Rhythm; s.bass = BassStyle::RootFifth;
+        s.repetition = 0.65f; s.ambitus = 0.6f; s.leaps = 0.45f; s.jazzChords = 0.f; s.colorChords = 0.2f;
+        s.solo = true; s.soloInstrument = "Mandoline"; s.groove = 2; s.grooveAmount = 0.35f;
+        inst("Banjo", "Gitarre", "Kontrabass");
+        break;
+    case 24:  // Kirche / Feierlich
+        s.scale = either(ScaleType::Major, ScaleType::NaturalMinor, 0.6f); bpm = 66;
+        s.melodyDensity = 0.35f; s.syncopation = 0.f; s.energy = 0.5f; s.creativity = 0.2f;
+        s.withDrums = false; s.accompaniment = AccompStyle::Pad; s.bass = BassStyle::Whole; s.harmonicRhythm = 2;
+        s.repetition = 0.6f; s.ambitus = 0.55f; s.leaps = 0.3f; s.jazzChords = 0.f; s.colorChords = 0.1f;
+        s.dynamicRange = 0.6f; s.humanize = 0.15f;
+        s.solo = coin(0.3f); s.soloInstrument = "Trompeten";
+        inst("Kirchenorgel", "Chor", "Kirchenorgel");
+        break;
+    case 25:  // Anden
+        s.scale = either(ScaleType::MinorPentatonic, ScaleType::NaturalMinor, 0.55f); bpm = 96;
+        s.melodyDensity = 0.5f; s.syncopation = 0.3f; s.energy = 0.55f; s.creativity = 0.35f;
+        s.drums = DrumStyle::Ballad; s.accompaniment = AccompStyle::Rhythm; s.bass = BassStyle::RootFifth;
+        s.repetition = 0.6f; s.ambitus = 0.7f; s.leaps = 0.55f; s.jazzChords = 0.f; s.colorChords = 0.2f;
+        s.solo = coin(0.4f); s.soloInstrument = "Mandoline";
+        inst("Panflöte", "Gitarre", "Kontrabass");
+        break;
+    case 26:  // Traumland
+        s.scale = either(ScaleType::Major, ScaleType::Lydian, 0.6f); bpm = 78;
+        s.melodyDensity = 0.4f; s.syncopation = 0.3f; s.energy = 0.38f; s.creativity = 0.35f;
+        s.drums = DrumStyle::Ballad; s.accompaniment = AccompStyle::Broken; s.harmonicRhythm = 1;
+        s.repetition = 0.7f; s.ambitus = 0.45f; s.leaps = 0.4f; s.jazzChords = 0.35f; s.colorChords = 0.35f;
+        s.groove = 1; s.grooveAmount = 0.55f; s.swing = 0.25f; s.humanize = 0.4f;
+        inst("Kalimba", "Harfe", "Kontrabass");
         break;
     default: {  // Zufall
         auto pick = [&](std::initializer_list<const char*> l) {
@@ -440,11 +504,12 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.harmonicRhythm = coin(0.5f) ? 0 : int(rng() % 3u) + 1;
         s.jazzChords = f(0.f, 0.7f); s.colorChords = f(0.f, 0.5f); s.dynamicRange = f(0.3f, 0.9f);
         s.useIntro = coin(0.9f); s.usePre = coin(0.6f); s.useBridge = coin(0.8f); s.useOutro = coin(0.9f);
-        inst(pick({"Piano", "E-Piano", "Flöte", "Lead", "Glocken", "Marimba", "Gitarre", "Streicher"}),
-             pick({"Piano", "E-Piano", "Streicher", "Pad", "Orgel", "Gitarre", "Harfe", "Chor"}),
+        inst(pick({"Piano", "E-Piano", "Flöte", "Lead", "Glocken", "Marimba", "Gitarre", "Streicher", "Saxofon", "Celesta",
+                   "Vibraphon", "Xylophon", "Mundharmonika", "Akkordeon", "Steel Drum", "Kalimba", "Panflöte", "Banjo", "Mandoline"}),
+             pick({"Piano", "E-Piano", "Streicher", "Pad", "Orgel", "Gitarre", "Harfe", "Chor", "Cembalo", "Akkordeon", "E-Gitarre", "Ukulele", "Kirchenorgel"}),
              pick({"Synth-Bass", "Kontrabass", "Piano"}));
         s.withDrums = coin(0.85f);
-        s.solo = coin(0.3f); s.soloInstrument = pick({"Lead", "Gitarre", "E-Piano", "Flöte", "Orgel"});
+        s.solo = coin(0.3f); s.soloInstrument = pick({"Lead", "Gitarre", "E-Piano", "Flöte", "Orgel", "Saxofon", "Tenorsaxofon", "E-Gitarre", "Vibraphon", "Mandoline", "Steel Drum"});
         s.groove = int(rng() % 3u); s.grooveAmount = f(0.3f, 0.8f);
         if (coin(0.25f)) orchestra(-1);
         break;
@@ -502,6 +567,13 @@ std::string GeneratorPanel::applyPromptTo(GeneratorSettings& s, const std::strin
         {"barock", 17}, {"mittelalter", 17}, {"ritter", 17}, {"klassisch", 17},
         {"western", 18}, {"cowboy", 18}, {"wüste", 18},
         {"sommer", 19}, {"strand", 19}, {"sonnig", 19}, {"urlaub", 19},
+        {"rock", 20}, {"metal", 20}, {"punk", 20},
+        {"paris", 21}, {"musette", 21}, {"café", 21}, {"cafe", 21}, {"chanson", 21},
+        {"karibik", 22}, {"reggae", 22}, {"insel", 22}, {"calypso", 22}, {"hawaii", 22}, {"latin", 22}, {"salsa", 22},
+        {"bluegrass", 23}, {"country", 23}, {"hillbilly", 23},
+        {"kirche", 24}, {"feierlich", 24}, {"hymne", 24}, {"erhaben", 24}, {"gottesdienst", 24},
+        {"anden", 25}, {"peru", 25}, {"inka", 25}, {"sehnsucht", 25},
+        {"traum", 26}, {"verträumt", 26}, {"einschlaf", 26}, {"spieluhr", 26}, {"gute nacht", 26},
     };
     int preset = -1;
     size_t bestPos = std::string::npos;
@@ -587,6 +659,13 @@ std::string GeneratorPanel::applyPromptTo(GeneratorSettings& s, const std::strin
     // 9. Instrumente (erstes = Melodie, zweites = Begleitung) – nur Band
     if (s.ensemble == Ensemble::Band) {
         static const std::pair<const char*, const char*> insts[] = {
+            {"e-gitarre", "E-Gitarre"}, {"verzerrt", "E-Gitarre"}, {"tenorsax", "Tenorsaxofon"}, {"saxofon", "Saxofon"},
+            {"saxophon", "Saxofon"}, {"sax", "Saxofon"}, {"mundharmonika", "Mundharmonika"}, {"akkordeon", "Akkordeon"},
+            {"cembalo", "Cembalo"}, {"celesta", "Celesta"}, {"xylophon", "Xylophon"}, {"vibraphon", "Vibraphon"},
+            {"röhrenglocke", "Röhrenglocken"}, {"piccolo", "Piccolo"}, {"tuba", "Tuba"},
+            {"kirchenorgel", "Kirchenorgel"}, {"pfeifenorgel", "Kirchenorgel"}, {"panflöte", "Panflöte"}, {"panfloete", "Panflöte"},
+            {"ukulele", "Ukulele"}, {"mandoline", "Mandoline"}, {"banjo", "Banjo"}, {"steel drum", "Steel Drum"},
+            {"steeldrum", "Steel Drum"}, {"steelpan", "Steel Drum"}, {"kalimba", "Kalimba"}, {"daumenklavier", "Kalimba"},
             {"e-piano", "E-Piano"}, {"rhodes", "E-Piano"}, {"glockenspiel", "Glocken"}, {"klavier", "Piano"}, {"piano", "Piano"},
             {"gitarre", "Gitarre"}, {"guitar", "Gitarre"}, {"flöte", "Flöte"}, {"glocke", "Glocken"}, {"marimba", "Marimba"},
             {"orgel", "Orgel"}, {"streicher", "Streicher"}, {"geige", "Streicher"}, {"chor", "Chor"}, {"synth", "Lead"},

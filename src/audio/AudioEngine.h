@@ -71,6 +71,8 @@ public:
     // Rendert den geladenen Song ohne Audiogerät in eine WAV-Datei.
     // tailSeconds = Ausklingzeit nach der letzten Note.
     bool renderToWav(const std::string& path, double tailSeconds = 2.0, int sampleRate = 48000);
+    // Rendert den geladenen Song von fromTick bis toTick in einen Stereo-Puffer (ohne Audiogerät, z.B. für Messungen)
+    std::vector<float> renderRange(double fromTick, double toTick, int sampleRate = 48000);
 
     // Abspiellautstärke 0..1.5 (1 = normal). Wird im Audio-Thread gelesen, daher atomar.
     std::atomic<float> masterVolume{1.f};

@@ -245,6 +245,69 @@ static std::vector<float> renderSamples(const Song& song, double tail) {
     return smp;
 }
 
+// Wahrgenommene Lautheit (vereinfachte K-Gewichtung wie bei LUFS: Tiefen leiser, Höhen ab 1,5 kHz +4 dB), in dB
+static double perceivedDb(const std::vector<float>& s) {
+    Biquad hp, sh;
+    hp.highpass(60.f, 0.5f, 48000.f);
+    sh.shelf(true, 1500.f, 4.f, 48000.f);
+    double sum = 0;
+    size_t n = 0;
+    for (size_t i = 0; i + 1 < s.size(); i += 2) {
+        float l = s[i], r = s[i + 1];
+        hp.process(l, r);
+        sh.process(l, r);
+        sum += double(l) * l + double(r) * r;
+        ++n;
+    }
+    return 10.0 * std::log10(std::max(1e-12, sum / double(std::max<size_t>(1, n))));
+}
+
+// Mischverhältnis messen:  MusicEngine.exe --balance
+// Rendert jede Spur einzeln und zeigt, wie laut sie (wahrgenommen) im Vergleich zur Melodie ist.
+static int balanceCli() {
+    struct Case { const char* name; GeneratorSettings gs; };
+    std::vector<Case> cases;
+    {
+        GeneratorSettings g; g.seed = 801; g.quality = 1; g.lengthSeconds = 60;
+        g.melodyInstrument = "Glocken"; g.chordInstrument = "Piano"; g.bassInstrument = "Kontrabass";
+        cases.push_back({"Band, Glocken-Melodie", g});
+    }
+    {
+        GeneratorSettings g; g.seed = 802; g.quality = 1; g.lengthSeconds = 60;
+        cases.push_back({"Band, Standard", g});
+    }
+    {
+        GeneratorSettings g; g.seed = 803; g.quality = 1; g.lengthSeconds = 60; g.ensemble = Ensemble::Orchestra; g.energy = 0.75f;
+        cases.push_back({"Orchester", g});
+    }
+    for (auto& c : cases) {
+        Song s = generateSong(c.gs);
+        std::printf("%s:\n", c.name);
+        std::vector<std::pair<std::string, double>> lv;
+        double ref = -999;
+        for (size_t i = 0; i < s.tracks.size(); ++i) {
+            if (s.tracks[i].notes.empty()) continue;
+            Song solo = s;
+            for (size_t j = 0; j < solo.tracks.size(); ++j) solo.tracks[j].muted = j != i;
+            solo.fx.on = false;
+            solo.fx.mastering = false;
+            // nur dort messen, wo die Spur spielt
+            Tick a = s.tracks[i].notes.front().start, b = 0;
+            for (auto& n : s.tracks[i].notes) b = std::max(b, n.end());
+            auto smp = renderSamples(solo, 0.2);
+            const size_t ia = std::min(smp.size(), size_t(s.ticksToSeconds(double(a)) * 48000.0) * 2);
+            const size_t ib = std::min(smp.size(), size_t(s.ticksToSeconds(double(b)) * 48000.0) * 2);
+            std::vector<float> part(smp.begin() + std::ptrdiff_t(ia), smp.begin() + std::ptrdiff_t(std::max(ia, ib)));
+            const double db = perceivedDb(part);
+            lv.push_back({s.tracks[i].name + " (" + s.tracks[i].instrument + ")", db});
+            if (s.tracks[i].name == "Melodie" || (ref < -900 && s.tracks[i].name.rfind("Violinen I", 0) == 0)) ref = db;
+        }
+        if (ref < -900 && !lv.empty()) ref = lv.front().second;
+        for (auto& [n, db] : lv) std::printf("   %-36s %+6.1f dB\n", n.c_str(), db - ref);
+    }
+    return 0;
+}
+
 // Mastering messen:  MusicEngine.exe --master
 static int masterCli() {
     struct M { double rmsDb, peak, crestDb, shortRangeDb; };
@@ -748,7 +811,9 @@ static int featuresCli() {
         solo.tracks[0].solo = true;   // nur Melodie
         renderRms(solo, &l1, &r1);
         Song panned = s;
-        for (auto& t : panned.tracks) t.pan = -1.f;   // alles links
+        for (auto& t : panned.tracks) t.pan = -1.f;   // alles links (trocken messen: Hall/Mastering sind absichtlich stereo)
+        panned.fx.on = false;
+        panned.fx.mastering = false;
         renderRms(panned, &l2, &r2);
         std::printf("      RMS normal L %.3f R %.3f | Solo Melodie L %.3f | alles links: L %.3f R %.3f\n", l0, r0, l1, l2, r2);
         check(l1 > 0.001f && l1 < l0 * 0.9f, "Mischpult: Solo (nur eine Spur hörbar)");
@@ -958,6 +1023,95 @@ static int featuresCli() {
         std::printf("      Mastering: %+.1f dB lauter, Spitze %.2f\n", gain, pk);
         check(gain > 0.5 && gain < 5.0 && pk <= 0.95f, "Mastering: etwas lauter, Spitzen begrenzt");
     }
+    // 14. Neue Instrumente und Schlagwerk
+    {
+        // jedes neue Instrument klingt (Pegel im Rahmen, keine kaputten Werte)
+        const char* insts[] = {"Saxofon", "Tenorsaxofon", "Piccolo", "Tuba", "Cembalo", "Celesta", "Xylophon", "Vibraphon",
+                               "Röhrenglocken", "Akkordeon", "Mundharmonika", "E-Gitarre"};
+        bool allOk = true;
+        for (auto name : insts) {
+            Song s;
+            s.bpm = 120;
+            Track t{"Test", name};
+            int p = std::string(name) == "Tuba" ? 41 : std::string(name) == "Piccolo" ? 81 : 64;
+            for (int i = 0; i < 4; ++i) t.notes.push_back({p + i * 2, Tick(i) * 480, 400, 0.8f});
+            s.tracks.push_back(t);
+            s.fx.on = false;
+            s.fx.mastering = false;
+            auto smp = renderSamples(s, 0.5);
+            double sum = 0;
+            bool fin = true;
+            for (float v : smp) { sum += double(v) * v; fin = fin && std::isfinite(v); }
+            const double db = 20 * std::log10(std::sqrt(sum / double(std::max<size_t>(1, smp.size()))) + 1e-12);
+            if (!fin || db < -45 || db > -6) { std::printf("      %s: %.1f dB %s\n", name, db, fin ? "" : "(kaputte Werte)"); allOk = false; }
+        }
+        check(allOk, "Neue Instrumente klingen (Saxofon, Tuba, Cembalo, Celesta ... E-Gitarre)");
+        // neue Schlagwerk-Klänge
+        bool drumsOk = true;
+        for (int p : {80, 81, 75, 76, 77, 52, 55}) {
+            Song s;
+            Track t{"Perc", "Schlagzeug"};
+            t.notes.push_back({p, 0, 120, 0.9f});
+            s.tracks.push_back(t);
+            s.fx.on = false;
+            s.fx.mastering = false;
+            auto smp = renderSamples(s, 2.0);
+            float pk = 0;
+            for (float v : smp) pk = std::max(pk, std::abs(v));
+            if (pk < 0.01f || !std::isfinite(pk)) { std::printf("      Schlagwerk %d stumm\n", p); drumsOk = false; }
+        }
+        check(drumsOk, "Triangel, Claves, Holzblock, Gong, Becken-Wirbel klingen");
+        // Orchester nutzt die neuen Farben
+        std::map<std::string, int> used;
+        int gongs = 0, triangles = 0;
+        for (int i = 0; i < 16; ++i) {
+            GeneratorSettings go;
+            go.seed = uint32_t(7300 + i);
+            go.quality = 1;
+            go.ensemble = Ensemble::Orchestra;
+            go.orchStyle = i % 8;
+            go.energy = 0.75f;
+            Song so = generateSong(go);
+            for (auto& t : so.tracks) {
+                if (!t.notes.empty()) used[t.name]++;
+                if (t.name == "Schlagwerk")
+                    for (auto& n : t.notes) { gongs += n.pitch == 52; triangles += n.pitch == 81; }
+            }
+        }
+        std::printf("      Orchester (16 Songs): Tuba %d, Piccolo %d, Cembalo %d Songs; %d Triangel-, %d Gong-Schläge\n",
+                    used["Tuba"], used["Piccolo"], used["Cembalo"], triangles, gongs);
+        check(used["Tuba"] > 0 && used["Piccolo"] > 0 && used["Cembalo"] > 0 && triangles > 0 && gongs > 0,
+              "Orchester nutzt Tuba, Piccolo, Cembalo, Triangel und Gong");
+        // Neue Vorlagen + Beschreibung
+        bool presetsOk = true;
+        for (int p : {20, 21}) {
+            GeneratorSettings gs;
+            std::mt19937 rng(3);
+            bool rb = false;
+            float bpm = 110;
+            int meter = 0;
+            GeneratorPanel::applyPresetTo(gs, p, rng, rb, bpm, meter);
+            gs.bpm = bpm;
+            gs.beatsPerBar = meter == 1 ? 3 : 4;
+            gs.seed = 11;
+            gs.quality = 1;
+            Song s = generateSong(gs);
+            bool hasInst = false;
+            for (auto& t : s.tracks) hasInst = hasInst || t.instrument == (p == 20 ? "E-Gitarre" : "Akkordeon");
+            std::printf("      Vorlage %s: %zu Spuren, %.0f s, Reibung %.2f %%\n", GeneratorPanel::presetName(p), s.tracks.size(),
+                        s.durationSeconds(), clashRate(s));
+            presetsOk = presetsOk && hasInst && clashRate(s) < 2.0;
+        }
+        GeneratorSettings gp;
+        std::mt19937 rng(1);
+        bool rb = true;
+        float bpm = 110;
+        int meter = 0;
+        const std::string fb = GeneratorPanel::applyPromptTo(gp, "jazz mit Saxofon und Vibraphon", rng, rb, bpm, meter);
+        std::printf("      \"jazz mit Saxofon und Vibraphon\" -> %s\n", fb.c_str());
+        check(presetsOk && gp.melodyInstrument == "Saxofon" && gp.chordInstrument == "Vibraphon",
+              "Vorlagen Rock + Paris, Beschreibung versteht neue Instrumente");
+    }
     // 11. Spielen: Tastenbelegung und freies Instrument
     {
         const auto& km = LivePlayer::keyMap();
@@ -994,6 +1148,120 @@ static int featuresCli() {
         const double glocken = rms("Glocken"), orgel = rms("Orgel"), aus = rms("");
         std::printf("      Live-Kanal RMS: Glocken %.4f, Orgel %.4f, ohne Instrument %.4f\n", glocken, orgel, aus);
         check(glocken > 0.001 && orgel > 0.001 && aus < 1e-6, "Freies Spiel-Instrument (Live-Kanal)");
+    }
+    // 15. Noch mehr Instrumente, Hand-Percussion und Orchester-Spannung
+    {
+        auto renderOne = [&](const char* name, int pitch, Tick len, double secs) {
+            Song s;
+            s.bpm = 120;
+            Track t{"Test", name};
+            t.notes.push_back({pitch, 0, len, 0.8f});
+            s.tracks.push_back(t);
+            s.fx.on = false;
+            s.fx.mastering = false;
+            return renderSamples(s, secs);
+        };
+        auto rmsOf = [](const std::vector<float>& v, size_t a, size_t b) {
+            double s = 0;
+            b = std::min(b, v.size());
+            for (size_t i = a; i < b; ++i) s += double(v[i]) * v[i];
+            return std::sqrt(s / double(std::max<size_t>(1, b - a)));
+        };
+        bool allOk = true;
+        for (auto name : {"Kirchenorgel", "Panflöte", "Ukulele", "Mandoline", "Banjo", "Steel Drum", "Kalimba"}) {
+            auto smp = renderOne(name, 67, 900, 1.0);
+            bool fin = true;
+            for (float v : smp) fin = fin && std::isfinite(v);
+            const double db = 20 * std::log10(rmsOf(smp, 0, smp.size()) + 1e-12);
+            if (!fin || db < -45 || db > -6) { std::printf("      %s: %.1f dB %s\n", name, db, fin ? "" : "(kaputte Werte)"); allOk = false; }
+        }
+        check(allOk, "Kirchenorgel, Panflöte, Ukulele, Mandoline, Banjo, Steel Drum, Kalimba klingen");
+        // Mandoline hält lange Töne mit Tremolo, die Ukulele klingt dagegen einfach aus
+        {
+            auto mand = renderOne("Mandoline", 67, 4 * 480, 2.0), uke = renderOne("Ukulele", 67, 4 * 480, 2.0);
+            const size_t sr2 = 48000 * 2;   // Stereo-Puffer: 1 s = 2 * 48000 Werte
+            const double mLate = rmsOf(mand, sr2 * 3 / 2, sr2 * 2) / std::max(1e-9, rmsOf(mand, 0, sr2 / 2));
+            const double uLate = rmsOf(uke, sr2 * 3 / 2, sr2 * 2) / std::max(1e-9, rmsOf(uke, 0, sr2 / 2));
+            std::printf("      nach 1,5 s noch: Mandoline %.0f %%, Ukulele %.0f %%\n", mLate * 100, uLate * 100);
+            check(mLate > 0.3 && mLate > uLate * 2, "Mandolinen-Tremolo hält lange Töne");
+        }
+        bool drumsOk = true;
+        for (int p : {60, 61, 62, 63, 64, 67, 68, 73, 74, 84}) {
+            auto smp = renderOne("Schlagzeug", p, 120, 2.0);
+            float pk = 0;
+            for (float v : smp) pk = std::max(pk, std::abs(v));
+            if (pk < 0.01f || !std::isfinite(pk)) { std::printf("      Schlagwerk %d stumm\n", p); drumsOk = false; }
+        }
+        check(drumsOk, "Congas, Bongos, Agogo, Guiro, Windspiel klingen");
+        // Orchester: Paukenwirbel (dichte 32tel mit Crescendo) und große Einzelschläge
+        int rolls = 0, bigHits = 0, finales = 0, songs = 0;
+        for (int i = 0; i < 16; ++i) {
+            GeneratorSettings go;
+            go.seed = uint32_t(9100 + i);
+            go.quality = 1;
+            go.ensemble = Ensemble::Orchestra;
+            go.orchStyle = i % 8;
+            go.energy = 0.7f;
+            Song so = generateSong(go);
+            ++songs;
+            const Tick th = so.ppq / 8;
+            Tick songEnd = 0;
+            for (auto& t : so.tracks) for (auto& n : t.notes) songEnd = std::max(songEnd, n.end());
+            for (auto& t : so.tracks) {
+                if (t.name != "Pauken") continue;
+                auto ns = t.notes;
+                std::sort(ns.begin(), ns.end(), [](const Note& a, const Note& b) { return a.start < b.start; });
+                int run = 0;
+                bool counted = false;
+                for (size_t j = 1; j < ns.size(); ++j) {
+                    const Tick d = ns[j].start - ns[j - 1].start;   // (humanisiert: nicht exakt gleich)
+                    if (d >= th / 2 && d <= th * 3 / 2) { if (++run >= 12 && !counted) { ++rolls; counted = true; } }
+                    else { run = 0; counted = false; }
+                }
+                for (auto& n : ns) {
+                    if (n.velocity >= 0.9f) ++bigHits;
+                    if (n.velocity >= 0.95f && n.start + 2 * so.ticksPerBar() + so.ppq >= songEnd) ++finales;   // Schlag auf den Schlussakkord
+                }
+            }
+        }
+        std::printf("      Orchester (%d Songs): %d Paukenwirbel, %d große Schläge, %d mal Schluss-Schlag\n", songs, rolls, bigHits, finales);
+        check(rolls >= 3 && bigHits >= 3 && finales >= 1, "Pauken wirbeln vor dem Refrain und schlagen laut auf die Eins");
+        // Neue Vorlagen: Karibik (mit Congas), Bluegrass, Kirche (Kathedrale), Anden, Traumland
+        bool presetsOk = true;
+        for (int p = 22; p <= 26; ++p) {
+            GeneratorSettings gs;
+            std::mt19937 rng(5);
+            bool rb = false;
+            float bpm = 110;
+            int meter = 0;
+            GeneratorPanel::applyPresetTo(gs, p, rng, rb, bpm, meter);
+            gs.bpm = bpm;
+            gs.beatsPerBar = meter == 1 ? 3 : 4;
+            gs.seed = 21;
+            gs.quality = 1;
+            Song s = generateSong(gs);
+            static const char* want[] = {"Steel Drum", "Banjo", "Kirchenorgel", "Panflöte", "Kalimba"};
+            bool hasInst = false;
+            int congas = 0;
+            for (auto& t : s.tracks) {
+                hasInst = hasInst || t.instrument == want[p - 22];
+                if (t.instrument == "Schlagzeug") for (auto& n : t.notes) congas += n.pitch >= 62 && n.pitch <= 64;
+            }
+            std::printf("      Vorlage %s: %zu Spuren, %.0f s, Reibung %.2f %%%s\n", GeneratorPanel::presetName(p), s.tracks.size(),
+                        s.durationSeconds(), clashRate(s), p == 22 ? (" , Congas " + std::to_string(congas)).c_str() : "");
+            presetsOk = presetsOk && hasInst && clashRate(s) < 2.0;
+            if (p == 22) presetsOk = presetsOk && congas > 0;
+            if (p == 24) presetsOk = presetsOk && s.fx.roomSize > 0.9f;   // Kathedrale
+        }
+        GeneratorSettings gp;
+        std::mt19937 rng(1);
+        bool rb = true;
+        float bpm = 110;
+        int meter = 0;
+        const std::string fb = GeneratorPanel::applyPromptTo(gp, "karibik mit steel drum und ukulele", rng, rb, bpm, meter);
+        std::printf("      \"karibik mit steel drum und ukulele\" -> %s\n", fb.c_str());
+        check(presetsOk && gp.melodyInstrument == "Steel Drum" && gp.chordInstrument == "Ukulele",
+              "Vorlagen Karibik, Bluegrass, Kirche, Anden, Traumland + Beschreibung");
     }
     std::printf("%s\n", fails ? "Es gab Fehler." : "Alle neuen Funktionen OK.");
     return fails ? 1 : 0;
@@ -1112,7 +1380,8 @@ static int instrumentTest() {
         float peak = 0;
         for (float x : buf) { sum += double(x) * x; peak = std::max(peak, std::abs(x)); }
         double rms = std::sqrt(sum / double(buf.size()));
-        std::printf("%-12s %8.1f %8.2f %10.0f\n", name.c_str(), 20 * std::log10(rms + 1e-9), peak, 4.0 / cpu);
+        std::printf("%-14s %8.1f %8.2f %10.0f   wahrgenommen %6.1f\n", name.c_str(), 20 * std::log10(rms + 1e-9), peak, 4.0 / cpu,
+                    perceivedDb(buf));
     }
     return 0;
 }
@@ -1215,6 +1484,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--forms") return formsCli();
     if (argc > 1 && std::string(argv[1]) == "--systems") return systemsCli();
     if (argc > 1 && std::string(argv[1]) == "--master") return masterCli();
+    if (argc > 1 && std::string(argv[1]) == "--balance") return balanceCli();
 
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);

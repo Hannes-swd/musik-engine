@@ -398,3 +398,24 @@ void AudioEngine::setTrackSends(int track, float reverb, float delay) {
     channels_[size_t(track)].reverb = std::clamp(reverb, 0.f, 1.f);
     channels_[size_t(track)].delay = std::clamp(delay, 0.f, 1.f);
 }
+
+std::vector<float> AudioEngine::renderRange(double fromTick, double toTick, int sampleRate) {
+    std::vector<float> out;
+    if (running_) return out;
+    std::lock_guard lock(mutex_);
+    sampleRate_ = sampleRate;
+    sequencer_.setSampleRate(sampleRate);
+    for (auto& c : channels_) c.instrument->setSampleRate(float(sampleRate));
+    initEffects(sampleRate);
+    sequencer_.setLoop(false);
+    sequencer_.seek(std::max(0.0, fromTick), *this);
+    sequencer_.play();
+    std::vector<float> buffer(512 * 2);
+    for (int guard = 0; guard < 200000 && sequencer_.position() < toTick; ++guard) {
+        processLocked(buffer.data(), 512);
+        out.insert(out.end(), buffer.begin(), buffer.end());
+        if (!sequencer_.isPlaying()) break;
+    }
+    sequencer_.seek(0, *this);
+    return out;
+}
