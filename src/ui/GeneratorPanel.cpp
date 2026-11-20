@@ -289,6 +289,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
     s.useIntro = s.usePre = s.useBridge = s.useOutro = true;
     s.generalPause = true;
     s.solo = false; s.soloInstrument = "Lead"; s.groove = 0; s.grooveAmount = 0.5f;   // eigene Akkorde bleiben erhalten
+    s.orchFullness = 0.6f; s.extraLayers = -1;   // Besetzung: automatisch
     s.form = -1;   // Songform passend zur Stimmung würfeln
     s.room = 0;    // Raumklang passend zur Musik
     randomBpm = false;
@@ -332,7 +333,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.scale = either(ScaleType::NaturalMinor, ScaleType::Major, 0.66f); bpm = 84;
         s.melodyDensity = 0.4f; s.syncopation = 0.12f; s.energy = 0.7f; s.creativity = 0.35f;
         s.dynamicRange = 0.75f;
-        orchestra(-1);
+        orchestra(-1); s.orchFullness = 0.75f;
         break;
     case 6:   // Melancholisch
         s.scale = either(ScaleType::NaturalMinor, ScaleType::Dorian, 0.6f); bpm = 84;
@@ -351,7 +352,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.scale = either(ScaleType::Major, ScaleType::Lydian, 0.7f); bpm = 128;
         s.melodyDensity = 0.55f; s.syncopation = 0.25f; s.energy = 0.8f; s.creativity = 0.4f;
         s.ambitus = 0.8f; s.leaps = 0.65f; s.repetition = 0.6f; s.dynamicRange = 0.8f; s.colorChords = 0.35f; s.jazzChords = 0.05f;
-        orchestra(0);
+        orchestra(0); s.orchFullness = 0.85f;
         break;
     case 9:   // Spannung / Thriller
         s.scale = either(ScaleType::Phrygian, ScaleType::HarmonicMinor, 0.5f); bpm = 96;
@@ -389,7 +390,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.scale = int(ScaleType::Major); bpm = 112;
         s.melodyDensity = 0.5f; s.syncopation = 0.2f; s.energy = 0.85f; s.creativity = 0.35f;
         s.ambitus = 0.8f; s.leaps = 0.7f; s.repetition = 0.6f; s.dynamicRange = 0.7f; s.colorChords = 0.3f; s.jazzChords = 0.f;
-        orchestra(3);
+        orchestra(3); s.orchFullness = 0.9f;   // volles Blech
         break;
     case 14:  // Walzer
         s.scale = either(ScaleType::Major, ScaleType::HarmonicMinor, 0.6f); bpm = 156; meter = 1;
@@ -417,7 +418,7 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.melodyDensity = 0.6f; s.syncopation = 0.1f; s.energy = 0.55f; s.creativity = 0.3f;
         s.harmonicRhythm = 2; s.jazzChords = 0.f; s.colorChords = 0.1f; s.leaps = 0.4f;
         s.dynamicRange = 0.35f; s.generalPause = false; s.allowKeyChange = false;
-        orchestra(6);
+        orchestra(6); s.orchFullness = 0.3f;   // Kammerbesetzung
         break;
     case 18:  // Western
         s.scale = either(ScaleType::Mixolydian, ScaleType::NaturalMinor, 0.5f); bpm = 100;
@@ -511,6 +512,8 @@ void GeneratorPanel::applyPresetTo(GeneratorSettings& s, int preset, std::mt1993
         s.withDrums = coin(0.85f);
         s.solo = coin(0.3f); s.soloInstrument = pick({"Lead", "Gitarre", "E-Piano", "Flöte", "Orgel", "Saxofon", "Tenorsaxofon", "E-Gitarre", "Vibraphon", "Mandoline", "Steel Drum"});
         s.groove = int(rng() % 3u); s.grooveAmount = f(0.3f, 0.8f);
+        s.orchFullness = f(0.3f, 1.f);
+        s.extraLayers = coin(0.15f) ? 0 : -1;
         if (coin(0.25f)) orchestra(-1);
         break;
     }
@@ -653,6 +656,11 @@ std::string GeneratorPanel::applyPromptTo(GeneratorSettings& s, const std::strin
     const bool noDrums = has("ohne schlagzeug") || has("ohne drums") || has("ohne beat");
     if (noDrums) { s.withDrums = false; found.push_back("ohne Schlagzeug"); }
     else if (has("mit schlagzeug") || has("mit drums") || has("mit beat")) s.withDrums = true;
+    if (has("viele instrumente") || has("volles orchester") || has("großes orchester") || has("tutti") || has("opulent")) {
+        s.orchFullness = 1.f; s.extraLayers = 4; found.push_back("volle Besetzung");
+    } else if (has("kammer") || has("klein besetzt") || has("wenig instrumente") || has("unplugged")) {
+        s.orchFullness = 0.25f; s.extraLayers = 0; found.push_back("kleine Besetzung");
+    }
     if (has("ohne solo")) s.solo = false;
     else if (word("solo") || has("improvis")) { s.solo = true; found.push_back("mit Solo"); }
 
@@ -741,6 +749,17 @@ void GeneratorPanel::draw(const Song* current) {
     int ens = int(s.ensemble);
     ImGui::SetNextItemWidth(w);
     if (ImGui::Combo("Besetzung", &ens, "Band\0Sinfonieorchester\0")) s.ensemble = Ensemble(ens);
+    helpMarker("Sinfonieorchester: Holzbläser, Hörner, Trompeten, Posaunen, Pauken, Harfe, Streicher - und je nach Song\n"
+               "auch Orgel, Celesta, Chor, Tuba, Piccolo. Die Melodie wandert durch die Instrumente, der Refrain wird zum Tutti.");
+    if (s.ensemble == Ensemble::Band) {
+        ImGui::SetNextItemWidth(w);
+        int li = s.extraLayers + 1;   // -1 = automatisch
+        if (ImGui::Combo("Zusatz-Instrumente", &li, "Automatisch\0Keine\0" "1\0" "2\0" "3\0" "4\0")) s.extraLayers = li - 1;
+        helpMarker("Jeder Song würfelt sich zusätzliche Stimmen, passend zum Stil:\n"
+                   "Fläche (z.B. Orgel, Streicher, Chor), Glitzer (Glocken, Celesta, Vibraphon ...),\n"
+                   "Bläser (Trompeten, Saxofon ...) und Gegenmelodie (Celli, Flöte, Hörner ...).\n"
+                   "Sie kommen nach und nach dazu - das Arrangement wächst zum Refrain hin.");
+    }
     if (s.ensemble == Ensemble::Orchestra) {
         ImGui::SetNextItemWidth(w);
         if (ImGui::BeginCombo("Orchester-Stil", orchStyleName(s.orchStyle))) {
@@ -751,9 +770,11 @@ void GeneratorPanel::draw(const Song* current) {
         }
         helpMarker("Jeder Stil hat eigene Lieblings-Techniken (Ostinati, Pizzicato, Tremolo, Kanon, Marsch-Trommel ...).\n"
                    "Pro Abschnitt wird daraus zufällig, aber passend zur Energie gewählt.");
+        ImGui::SetNextItemWidth(w);
+        ImGui::SliderFloat("Besetzungsdichte", &s.orchFullness, 0.f, 1.f, s.orchFullness < 0.35f ? "Kammer" : s.orchFullness < 0.7f ? "Normal" : "Volles Tutti");
+        helpMarker("Wie viele Instrumente gleichzeitig spielen: Holzbläser-Satz, Melodie in mehreren Farben (Tutti),\n"
+                   "Orgel, Harfen-Arpeggien, Celesta. Kammer = schlank und durchsichtig, Volles Tutti = großer Filmklang.");
     }
-    helpMarker("Sinfonieorchester: Holzbläser, Hörner, Trompeten, Posaunen, Pauken, Harfe und Streicher.\n"
-               "Die Melodie wandert je nach Abschnitt durch die Instrumente, der Refrain wird zum Tutti.");
 
     // ---- Endlos-Modus ----
     ImGui::SeparatorText("Endlos-Modus (Radio)");
@@ -1018,6 +1039,10 @@ void GeneratorPanel::draw(const Song* current) {
             for (auto& t : info.techniques) ImGui::BulletText("%s", t.c_str());
         } else {
             ImGui::Text("Schlagzeug: %s", info.drums.c_str());
+            if (!info.layers.empty()) {
+                ImGui::Text("Zusatz-Instrumente:");
+                for (auto& l : info.layers) ImGui::BulletText("%s", l.c_str());
+            }
         }
         for (auto& p : info.progressions) ImGui::BulletText("%s", p.c_str());
         if (!info.systems.empty() && ImGui::TreeNodeEx("Kompositions-Systeme", ImGuiTreeNodeFlags_DefaultOpen)) {

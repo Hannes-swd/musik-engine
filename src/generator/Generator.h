@@ -98,6 +98,8 @@ struct GeneratorSettings {
 
     Ensemble ensemble = Ensemble::Band;          // Band oder Sinfonieorchester
     int orchStyle = -1;                          // Orchester-Stil (siehe orchStyleName), -1 = Zufall
+    float orchFullness = 0.6f;                   // Orchester: wie viele Instrumente gleichzeitig (0 = Kammer, 1 = volles Tutti)
+    int extraLayers = -1;                        // Band: Zusatz-Instrumente (-1 = automatisch, 0 = keine, 1..4)
     std::shared_ptr<const MusicalIdea> idea;     // optional: eigene Idee ausbauen
 
     // Gründlichkeit 1..10: wie viele Kandidaten der "Kritiker" bewertet
@@ -116,6 +118,7 @@ struct GenerationInfo {
     std::string formName;                  // gewählte Songform
     std::vector<std::string> systems;      // Kompositions-Systeme pro Abschnitt (Harmonie · Rhythmus · Melodie)
     std::vector<std::string> techniques;   // eingesetzte Orchester-Techniken pro Abschnitt
+    std::vector<std::string> layers;       // Band: gewürfelte Zusatz-Instrumente (z.B. "Fläche: Orgel")
     std::string notes;                     // Besonderheiten (Rückung …)
     float score = 0;                       // Bewertung des Kritikers
     int candidatesEvaluated = 0;

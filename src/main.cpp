@@ -304,6 +304,32 @@ static int balanceCli() {
         }
         if (ref < -900 && !lv.empty()) ref = lv.front().second;
         for (auto& [n, db] : lv) std::printf("   %-36s %+6.1f dB\n", n.c_str(), db - ref);
+        // Letzter Refrain: jede Spur im Verhältnis zum ganzen Mix (wer sticht heraus, wer trägt bei?)
+        Tick wa = 0, wb = 0;
+        for (auto& sec : s.sections)
+            if (sec.name.rfind("Refrain", 0) == 0) { wa = sec.start; wb = sec.start + sec.length; }
+        if (wb > wa) {
+            auto window = [&](const Song& song) {
+                auto smp = renderSamples(song, 0.2);
+                const size_t ia = std::min(smp.size(), size_t(s.ticksToSeconds(double(wa)) * 48000.0) * 2);
+                const size_t ib = std::min(smp.size(), size_t(s.ticksToSeconds(double(wb)) * 48000.0) * 2);
+                return perceivedDb(std::vector<float>(smp.begin() + std::ptrdiff_t(ia), smp.begin() + std::ptrdiff_t(std::max(ia, ib))));
+            };
+            Song all = s;
+            all.fx.on = false;
+            all.fx.mastering = false;
+            const double mix = window(all);
+            std::vector<std::pair<double, std::string>> rows;
+            for (size_t i = 0; i < s.tracks.size(); ++i) {
+                Song solo = all;
+                for (size_t j = 0; j < solo.tracks.size(); ++j) solo.tracks[j].muted = j != i;
+                const double db = window(solo);
+                if (db > -150) rows.push_back({db - mix, s.tracks[i].name});
+            }
+            std::sort(rows.rbegin(), rows.rend());
+            std::printf("   -- letzter Refrain, relativ zum Gesamtmix (%zu Stimmen spielen):\n", rows.size());
+            for (auto& [d, n] : rows) std::printf("      %-30s %+6.1f dB\n", n.c_str(), d);
+        }
     }
     return 0;
 }
@@ -1263,6 +1289,75 @@ static int featuresCli() {
         check(presetsOk && gp.melodyInstrument == "Steel Drum" && gp.chordInstrument == "Ukulele",
               "Vorlagen Karibik, Bluegrass, Kirche, Anden, Traumland + Beschreibung");
     }
+    // 16. Mehr Instrumente gleichzeitig: Orchester-Besetzungsdichte, Orgel, Band-Zusatzstimmen
+    {
+        // durchschnittlich gleichzeitig klingende Stimmen im Refrain
+        auto simul = [&](const Song& s) {
+            double sum = 0;
+            int cnt = 0;
+            for (auto& sec : s.sections) {
+                if (sec.name.rfind("Refrain", 0) != 0) continue;
+                for (Tick t = sec.start; t < sec.start + sec.length; t += s.ppq) {
+                    int n = 0;
+                    for (auto& tr : s.tracks) {
+                        bool on = false;
+                        for (auto& x : tr.notes) on = on || (x.start <= t && x.end() > t);
+                        n += on;
+                    }
+                    sum += n;
+                    ++cnt;
+                }
+            }
+            return cnt ? sum / cnt : 0.0;
+        };
+        double thin = 0, full = 0;
+        int organs = 0, celestas = 0, windChoirs = 0;
+        for (int i = 0; i < 12; ++i) {
+            GeneratorSettings go;
+            go.seed = uint32_t(9500 + i);
+            go.quality = 1;
+            go.ensemble = Ensemble::Orchestra;
+            go.orchStyle = i % 8;
+            go.energy = 0.7f;
+            go.orchFullness = 0.f;
+            thin += simul(generateSong(go));
+            go.orchFullness = 1.f;
+            GenerationInfo inf;
+            Song so = generateSong(go, &inf);
+            full += simul(so);
+            for (auto& t : so.tracks) { organs += t.name == "Orgel" && t.notes.size() > 8; celestas += t.name == "Celesta" && t.notes.size() > 8; }
+            for (auto& tq : inf.techniques) windChoirs += tq.find("Holzbläser-Satz") != std::string::npos;
+        }
+        thin /= 12; full /= 12;
+        std::printf("      Orchester-Refrain: %.1f Stimmen gleichzeitig (Kammer) -> %.1f (volles Tutti); Orgel in %d, Celesta in %d Songs, %d x Holzbläser-Satz\n",
+                    thin, full, organs, celestas, windChoirs);
+        check(full > thin + 1.5 && organs > 0 && celestas > 0 && windChoirs > 0, "Orchester: Besetzungsdichte, Orgel, Celesta, Holzbläser-Satz");
+        // Band: verschiedene Zusatz-Instrumente pro Song
+        std::set<std::string> combos, insts;
+        int layered = 0;
+        double clashSum = 0;
+        for (int i = 0; i < 12; ++i) {
+            GeneratorSettings gb;
+            gb.seed = uint32_t(9600 + i);
+            gb.quality = 1;
+            gb.energy = 0.4f + 0.05f * float(i);
+            GenerationInfo inf;
+            Song sb = generateSong(gb, &inf);
+            std::string c;
+            for (auto& l : inf.layers) { c += l + ";"; insts.insert(l.substr(0, l.find(" ("))); }
+            combos.insert(c);
+            layered += inf.layers.size() >= 2;
+            clashSum += clashRate(sb);
+        }
+        GeneratorSettings g0;
+        g0.seed = 9600; g0.quality = 1; g0.extraLayers = 0;
+        GenerationInfo i0;
+        generateSong(g0, &i0);
+        std::printf("      Band (12 Songs): %zu verschiedene Besetzungen, %zu verschiedene Zusatz-Instrumente, %d mit 2+ Zusatzstimmen, Reibung %.2f %%\n",
+                    combos.size(), insts.size(), layered, clashSum / 12);
+        check(combos.size() >= 9 && insts.size() >= 8 && layered >= 8 && i0.layers.empty() && clashSum / 12 < 1.0,
+              "Band: jeder Song anders besetzt (Fläche, Glitzer, Bläser, Gegenmelodie)");
+    }
     std::printf("%s\n", fails ? "Es gab Fehler." : "Alle neuen Funktionen OK.");
     return fails ? 1 : 0;
 }
@@ -1335,6 +1430,7 @@ static int analyzeCli(int argc, char** argv) {
     std::sort(top.rbegin(), top.rend());
     for (size_t i = 0; i < top.size() && i < 6; ++i) std::printf("   %5d  %s\n", top[i].first, top[i].second.c_str());
     for (auto& t : info.techniques) std::printf("     - %s\n", t.c_str());
+    for (auto& t : info.layers) std::printf("     + %s\n", t.c_str());
     return 0;
 }
 

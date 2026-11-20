@@ -373,7 +373,7 @@ struct MNote {
 using Motif = std::vector<MNote>;
 
 // Orchester-Stimmen (Partitur-Reihenfolge)
-enum Orch { FL, OB, CL, FG, HN, TP, TB, TI, PC, TK, GL, HP, CH, V1, V2, VA, VC, KB, PZ, TU, PI, CB, OCOUNT };
+enum Orch { FL, OB, CL, FG, HN, TP, TB, TI, PC, TK, GL, HP, CH, V1, V2, VA, VC, KB, PZ, TU, PI, CB, OG, CE, OCOUNT };
 
 // Orchester-Techniken
 enum class Tex { Pad, Ostinato8, Ostinato16, Arpeggio, Tremolo, Pizz, Stabs, Chorale, Waltz, March, Count };
@@ -406,6 +406,12 @@ struct OrchPlan {
     bool brassSwell = false;        // Blech: leise ansetzen und anschwellen (fp<)
     bool snareRoll = false;         // Trommelwirbel (Marsch) vor dem Refrain
     bool accentHit = false;         // "Schicksalsschlag": Pauke + große Trommel + Becken auf der Eins
+    // Besetzungsdichte: mehr Instrumente gleichzeitig
+    bool windChoir = false;         // Holzbläser-Satz: Akkord auf Flöte, Oboe, Klarinette, Fagott verteilt
+    int tutti = 0;                  // Bitmaske: welche Instrumente die Melodie zusätzlich mitspielen
+    bool organ = false;             // Orgel: Plenum-Akkorde + Pedal
+    bool harpColor = false;         // Harfen-Arpeggien über der Textur
+    bool celesta = false;           // Celesta: Spieluhr-Figuren hoch oben
 };
 
 // ---------------------------------------------------------------------
@@ -539,7 +545,7 @@ const char* percTName(PercT t) {
 const char* orchInstName(int i) {
     static const char* n[] = {"Flöte", "Oboe", "Klarinette", "Fagott", "Hörner", "Trompeten", "Posaunen", "Pauken",
                               "Schlagwerk", "Taiko", "Glockenspiel", "Harfe", "Chor", "Violinen I", "Violinen II",
-                              "Bratschen", "Celli", "Kontrabässe", "Streicher pizz.", "Tuba", "Piccolo", "Cembalo"};
+                              "Bratschen", "Celli", "Kontrabässe", "Streicher pizz.", "Tuba", "Piccolo", "Cembalo", "Orgel", "Celesta"};
     return n[std::clamp(i, 0, int(OCOUNT) - 1)];
 }
 
@@ -635,6 +641,24 @@ private:
     // --- Schlagzeug ---
     void genDrums(const Material& m, const SecDef& sd, size_t k, Tick secStart, float vel, std::vector<Note>& out);
     bool bigFinale_ = false;   // Orchester: Paukenwirbel + Schluss-Schlag am Ende
+    int organSong_ = -1, celestaSong_ = -1;   // Orchester: Orgel / Celesta in diesem Song? (-1 = noch nicht gewürfelt)
+
+    // --- Band: pro Song gewürfelte Zusatz-Instrumente (Fläche, Glitzer, Bläser, Gegenmelodie) ---
+    struct BandLayer { int kind = 0; std::string inst; int mode = 0; std::vector<int> prev; int prevLine = -1; };
+    std::vector<BandLayer> layers_;
+    static const char* layerName(int kind) {
+        static const char* n[] = {"Fläche", "Glitzer", "Bläser", "Gegenmelodie"};
+        return n[std::clamp(kind, 0, 3)];
+    }
+    void chooseLayers();
+    bool layerSafe(int p, Tick a, Tick b, const Chord& ch, const std::vector<Note>& mel) const;
+    std::vector<int> layerChord(const Chord& ch, int lo, int hi, int n, Tick a, Tick b, const std::vector<Note>& mel,
+                                std::vector<int>& prev) const;
+    void genLayer(BandLayer& L, const SecDef& sd, int occ, bool lastChorus, const std::vector<TChord>& tc, Tick secStart,
+                  float vel, const std::vector<Note>& mel, std::vector<Note>& out);
+public:
+    std::vector<std::string> layersInfo() const;
+private:
     static bool isInst(const std::string& a, std::initializer_list<const char*> l) {
         for (const char* x : l) if (a == x) return true;
         return false;
@@ -1594,10 +1618,39 @@ void Builder::planOrchestra(Material& m, Sec t, float e) {
     const float ep = sname == "Episch (Film)" ? 1.f : sname == "Mysteriös" ? 0.5f : sname == "Marsch / Heroisch" ? 0.4f
                    : sname == "Romantisch" ? 0.25f : sname == "Minimal" ? 0.3f : 0.f;
     const bool big = t == Sec::Chorus || (t == Sec::Bridge && e > 0.5f) || t == Sec::Outro;
-    o.choir = big ? chance(r_, ep * 0.9f) : (t == Sec::Pre || t == Sec::Bridge) ? chance(r_, ep * 0.45f) : false;
+    o.choir = big ? chance(r_, std::min(1.f, ep * 0.9f + 0.35f * std::clamp(s_.orchFullness - 0.4f, 0.f, 1.f))) : (t == Sec::Pre || t == Sec::Bridge) ? chance(r_, ep * 0.45f) : false;
     o.choirMode = (t == Sec::Chorus && chance(r_, 0.35f)) ? 1 : 0;
     o.braams = P.brass && (t == Sec::Chorus || (t == Sec::Bridge && e > 0.5f)) && chance(r_, ep * 0.8f);
     o.taiko = (t != Sec::Outro) && chance(r_, ep * (sname == "Episch (Film)" ? 0.5f + e : 0.3f + e * 0.5f));
+
+    // Besetzungsdichte: je voller, desto mehr Instrumentengruppen spielen gleichzeitig
+    {
+        const float F = std::clamp(s_.orchFullness, 0.f, 1.f);
+        const bool lyrical = sname == "Romantisch" || sname == "Pastoral" || sname == "Walzer";
+        if (organSong_ < 0) {   // einmal pro Song: gibt es eine Orgel / Celesta? (jeder Song klingt anders besetzt)
+            const float og = sname == "Mysteriös" ? 0.6f : sname == "Episch (Film)" ? 0.45f : sname == "Barock / Kammer" ? 0.4f
+                           : sname == "Romantisch" ? 0.3f : sname == "Marsch / Heroisch" ? 0.2f : 0.08f;
+            organSong_ = chance(r_, og * (0.4f + F)) ? 1 : 0;
+            celestaSong_ = chance(r_, (lyrical || sname == "Mysteriös" || sname == "Minimal" ? 0.45f : 0.12f) * (0.4f + F)) ? 1 : 0;
+        }
+        o.windChoir = sname != "Minimal" && t != Sec::Intro && chance(r_, (big ? 0.3f : 0.12f) + 0.55f * F);
+        o.tutti = 0;
+        if ((t == Sec::Chorus || (t == Sec::Outro && e > 0.6f)) && o.mel != MelT::Unison && o.mel != MelT::CallResponse &&
+            chance(r_, 0.15f + 0.75f * F * (0.5f + e))) {
+            // Melodie in mehreren Farben gleichzeitig: Flöte darüber, Oboe/Klarinette/2. Geigen im Einklang, Hörner darunter
+            std::vector<int> cand = {FL, OB, CL, V2};
+            if (P.brass && e > 0.6f) cand.push_back(HN);
+            if (P.brass && e > 0.7f && F > 0.6f && sname != "Pastoral") cand.push_back(TP);
+            std::shuffle(cand.begin(), cand.end(), r_);
+            int want = 1 + int(F * 2.f + e);
+            for (int c : cand)
+                if (want > 0 && c != o.lead && c != o.second && c != o.counterInst) { o.tutti |= 1 << c; --want; }
+        }
+        o.organ = organSong_ == 1 && (big || ((sname == "Mysteriös" || sname == "Barock / Kammer") && t != Sec::Intro));
+        o.harpColor = o.tex != Tex::Arpeggio && sname != "Marsch / Heroisch" &&
+                      chance(r_, (lyrical || sname == "Episch (Film)" || sname == "Mysteriös" ? 0.35f : 0.12f) * (0.5f + F));
+        o.celesta = celestaSong_ == 1 && t != Sec::Outro && (t != Sec::Chorus || chance(r_, 0.5f));
+    }
 
     // Grundgerüst passend dazu: Akkorde kommen aus der Textur, Bass aus der Bass-Technik
     m.acc = AccompStyle::Pad;
@@ -1628,6 +1681,15 @@ std::vector<std::string> Builder::orchInfo() const {
         if (o.brassSwell) s += ", Blech-Anschwellen";
         if (o.snareRoll) s += ", Trommelwirbel";
         if (o.accentHit) s += ", Schicksalsschlag";
+        if (o.tutti) {
+            std::string who;
+            for (int i = 0; i < OCOUNT; ++i) if (o.tutti & (1 << i)) who += std::string(who.empty() ? "" : "+") + orchInstName(i);
+            s += ", Tutti-Verdopplung (" + who + ")";
+        }
+        if (o.windChoir) s += ", Holzbläser-Satz";
+        if (o.organ) s += ", Orgel";
+        if (o.harpColor) s += ", Harfen-Arpeggien";
+        if (o.celesta) s += ", Celesta";
         out.push_back(s);
     }
     return out;
@@ -1639,7 +1701,8 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
     // Spielbare Tonumfänge der Register (MIDI)
     static const int range[OCOUNT][2] = {{60, 96}, {58, 91}, {50, 89}, {34, 72}, {41, 77}, {55, 82}, {40, 72},
                                          {38, 55}, {0, 127}, {0, 127}, {72, 105}, {24, 100}, {48, 81}, {55, 100},
-                                         {55, 93}, {48, 84}, {36, 76}, {28, 60}, {36, 88}, {26, 58}, {74, 105}, {41, 89}};
+                                         {55, 93}, {48, 84}, {36, 76}, {28, 60}, {36, 88}, {26, 58}, {74, 105}, {41, 89},
+                                         {36, 96}, {67, 100}};
     const OrchPlan& P = m.orch;
     const OrchProfile& prof = orchProfiles()[size_t(rs_.orchStyle)];
     const std::string style = prof.name;
@@ -1727,6 +1790,23 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
         for (auto& n : mel) put(lead, n, 0, 1.f);
         break;
     }
+    // Tutti: weitere Instrumente spielen die Melodie mit (Flöte eine Oktave höher, Hörner eine Oktave tiefer)
+    if (P.tutti && melT != MelT::CallResponse && melT != MelT::Unison) {
+        for (int ti : {FL, OB, CL, V2, HN, TP}) {
+            if (!(P.tutti & (1 << ti)) || ti == lead || ti == second || (counter && ti == P.counterInst)) continue;
+            const int sh = ti == FL ? 12 : ti == HN ? -12 : 0;
+            for (auto& n : mel) {
+                if (ti == HN) {   // tief nur lange Akkordtöne (sonst reibt es unten)
+                    if (n.length < eighth) continue;
+                    bool chordTone = true;
+                    for (const auto& c : tc)
+                        if (secStart + c.start < n.end() && secStart + c.start + c.len > n.start) chordTone = chordTone && c.chord.hasPc(n.pitch);
+                    if (!chordTone) continue;
+                }
+                put(ti, n, sh, ti == HN ? 0.55f : 0.65f);
+            }
+        }
+    }
 
     // Alle eben geschriebenen Melodie-Noten (inkl. Verdopplungen) merken: sie gelten beim Bereinigen als fest
     auto markNotes = [&](std::set<std::tuple<std::string, Tick, int>>& keys, const std::array<size_t, OCOUNT>& from) {
@@ -1772,7 +1852,7 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
     };
 
     // Welche Streicherstimmen sind frei für die Begleitung? (Melodie/Partner/Gegenstimme nicht doppelt belegen)
-    auto taken = [&](int x) { return x == lead || (melT != MelT::Solo && x == second) || (counter && x == P.counterInst); };
+    auto taken = [&](int x) { return x == lead || (melT != MelT::Solo && x == second) || (counter && x == P.counterInst) || (P.tutti & (1 << x)); };
     const int upT = !taken(V2) ? V2 : !taken(VA) ? VA : CL;
     const int loT = !taken(VA) ? VA : !taken(V2) ? V2 : FG;
     // ---------- 2. Begleit-Textur ----------
@@ -1872,6 +1952,55 @@ void Builder::orchestrate(const Material& m, const SecDef& sd, size_t k, const s
                 }
             break;
         default: break;
+        }
+    }
+
+    // ---------- 2b. Mehr Farben gleichzeitig: Holzbläser-Satz, Orgel, Harfe, Celesta ----------
+    const bool vcMelodyEarly = lead == VC || melT == MelT::Unison || (melT != MelT::Solo && second == VC) || (counter && P.counterInst == VC);
+    if (P.windChoir) {   // Akkord von oben nach unten auf die Holzbläser verteilt (wie in einer echten Partitur)
+        const float wv = vel * (sd.type == Sec::Chorus ? 0.42f : 0.34f);
+        for (auto& c : tc) {
+            const auto v = makeRoom(c, voice(c.chord));
+            const Tick t0 = secStart + c.start, len = c.len - six_ / 2;
+            if (!taken(FL)) add(FL, v.back() + 12, t0, len, wv);
+            if (!taken(OB) && v.size() >= 2) add(OB, v[v.size() - 2] + 12, t0, len, wv * 0.9f);
+            if (!taken(CL) && !(P.tex == Tex::Arpeggio && style == "Barock / Kammer")) add(CL, v.front() + (v.front() < 55 ? 12 : 0), t0, len, wv * 0.9f);
+            if (!taken(FG) && !vcMelodyEarly) add(FG, v.front() - 12, t0, len, wv * 0.85f);
+        }
+    }
+    if (P.organ) {   // Orgel: Manual-Akkord (mit Oktave darüber) und Pedal im tiefen Register
+        const bool loud = sd.type == Sec::Chorus || sd.type == Sec::Outro;
+        const float ov = vel * (loud ? 0.55f : 0.4f);
+        for (auto& c : tc) {
+            const auto v = makeRoom(c, voice(c.chord));
+            const Tick t0 = secStart + c.start, len = c.len - six_ / 2;
+            for (int p : v) add(OG, p, t0, len, ov);
+            if (loud) add(OG, v.back() + 12, t0, len, ov * 0.8f);
+            int ped = 36;
+            while (mod12(ped) != mod12(c.bass)) ++ped;
+            add(OG, ped, t0, len, ov * 0.9f);
+        }
+    }
+    if (P.harpColor && !taken(HP)) {   // Harfe: fließende Arpeggien auf und ab, über der Textur
+        for (auto& c : tc) {
+            const auto v = makeRoom(c, voice(c.chord));
+            std::vector<int> seq = v;
+            for (int p : v) seq.push_back(p + 12);
+            std::vector<int> order;
+            for (int i = 0; i < int(seq.size()); ++i) order.push_back(i);
+            for (int i = int(seq.size()) - 2; i >= 1; --i) order.push_back(i);
+            int i = 0;
+            for (Tick t = 0; t < c.len; t += eighth, ++i)
+                add(HP, seq[size_t(order[size_t(i) % order.size()])], secStart + c.start + t, eighth * 2, vel * (t % beat_ == 0 ? 0.48f : 0.4f));
+        }
+    }
+    if (P.celesta) {   // Celesta: zarte Spieluhr-Figur zwei Oktaven höher (Akkordtöne, kreisend)
+        static const int fig[4] = {0, 2, 1, 2};
+        for (auto& c : tc) {
+            const auto v = makeRoom(c, voice(c.chord));
+            int i = 0;
+            for (Tick t = 0; t < c.len; t += beat_, ++i)
+                add(CE, v[size_t(fig[i % 4]) % v.size()] + 24, secStart + c.start + t, beat_, vel * (i % 4 == 0 ? 0.45f : 0.36f));
         }
     }
 
@@ -2584,6 +2713,243 @@ void Builder::genDrums(const Material& m, const SecDef& sd, size_t k, Tick secSt
     }
 }
 
+
+// ===================== Band: Zusatz-Instrumente =====================
+// Jeder Song würfelt sich 1–3 zusätzliche Stimmen aus einem Pool, der zum Stil passt – so klingt nicht jeder Song
+// nach "Melodie + Begleitung + Bass + Schlagzeug". Sie kommen nach und nach dazu (das Arrangement wächst).
+void Builder::chooseLayers() {
+    layers_.clear();
+    if (s_.ensemble == Ensemble::Orchestra || s_.extraLayers == 0) return;
+    const bool rock = (s_.withDrums && rs_.drumStyle == DrumStyle::Rock) || isInst(s_.chordInstrument, {"E-Gitarre"}) ||
+                      isInst(s_.melodyInstrument, {"E-Gitarre"});
+    const bool jazz = (s_.withDrums && rs_.drumStyle == DrumStyle::Jazz) || s_.swing > 0.35f;
+    const bool island = islandSong();
+    const bool soft = s_.energy < 0.45f || !s_.withDrums;
+    const bool folk = isInst(s_.melodyInstrument, {"Banjo", "Mandoline", "Akkordeon", "Mundharmonika", "Panflöte"}) ||
+                      isInst(s_.chordInstrument, {"Gitarre", "Ukulele", "Akkordeon"});
+    const int want = s_.extraLayers > 0 ? std::min(4, s_.extraLayers)
+                                        : std::clamp(2 + int(s_.energy > 0.55f) + int(chance(r_, 0.4f)) - int(s_.energy < 0.35f), 1, 4);
+    std::vector<std::pair<int, float>> kinds = {{0, soft ? 1.3f : 0.9f},
+                                                {1, rock ? 0.3f : soft ? 1.1f : 0.8f},
+                                                {2, (jazz || rock) ? 1.1f : s_.energy > 0.55f ? 0.8f : 0.25f},
+                                                {3, 1.f}};
+    auto used = [&](const std::string& n) {
+        if (n == s_.melodyInstrument || n == s_.chordInstrument || n == s_.bassInstrument || (s_.solo && n == s_.soloInstrument)) return true;
+        for (auto& L : layers_) if (L.inst == n) return true;
+        return false;
+    };
+    using Pool = std::vector<std::pair<std::string, float>>;
+    while (int(layers_.size()) < want && !kinds.empty()) {
+        std::vector<float> w;
+        for (auto& k : kinds) w.push_back(k.second);
+        const size_t ki = size_t(pickWeighted(r_, w));
+        const int kind = kinds[ki].first;
+        kinds.erase(kinds.begin() + long(ki));
+        Pool pool;
+        switch (kind) {
+        case 0:   // Fläche: gehaltene Akkorde
+            if (rock) pool = {{"Orgel", 3.f}, {"Streicher", 1.f}, {"Pad", 1.f}};
+            else if (jazz) pool = {{"Orgel", 2.f}, {"Streicher", 1.f}, {"Pad", 0.5f}};
+            else if (soft) pool = {{"Streicher", 2.f}, {"Pad", 1.5f}, {"Chor", 1.f}, {"Kirchenorgel", 0.3f}, {"Akkordeon", 0.3f}};
+            else if (island) pool = {{"Pad", 1.f}, {"Streicher", 1.f}, {"Orgel", 0.6f}};
+            else pool = {{"Streicher", 2.f}, {"Pad", 1.f}, {"Orgel", 1.2f}, {"Chor", 0.8f}, {"Akkordeon", 0.4f}};
+            break;
+        case 1:   // Glitzer: helle Schlaginstrumente
+            if (jazz) pool = {{"Vibraphon", 2.f}, {"Celesta", 0.5f}};
+            else if (island) pool = {{"Marimba", 1.5f}, {"Kalimba", 1.f}, {"Steel Drum", 1.f}, {"Xylophon", 0.5f}};
+            else if (soft) pool = {{"Glocken", 1.f}, {"Celesta", 1.2f}, {"Kalimba", 0.8f}, {"Harfe", 1.f}, {"Vibraphon", 0.6f}};
+            else pool = {{"Glocken", 1.f}, {"Celesta", 0.8f}, {"Vibraphon", 0.8f}, {"Xylophon", 0.6f}, {"Marimba", 0.6f},
+                         {"Harfe", 0.6f}, {"Kalimba", 0.5f}};
+            break;
+        case 2:   // Bläser: Stöße und Schwellungen
+            if (jazz) pool = {{"Saxofon", 1.2f}, {"Tenorsaxofon", 1.f}, {"Trompeten", 1.f}};
+            else if (rock) pool = {{"Trompeten", 1.f}, {"Posaunen", 0.6f}, {"Hörner", 0.4f}};
+            else if (island) pool = {{"Trompeten", 1.2f}, {"Saxofon", 0.6f}};
+            else pool = {{"Trompeten", 1.f}, {"Hörner", 1.f}, {"Saxofon", 0.6f}, {"Posaunen", 0.4f}};
+            break;
+        default:  // Gegenmelodie
+            if (rock) pool = {{"E-Gitarre", 1.2f}, {"Orgel", 0.4f}, {"Violinen", 0.5f}};
+            else if (jazz) pool = {{"Saxofon", 0.8f}, {"Vibraphon", 0.4f}, {"Flöte", 0.6f}, {"Celli", 0.4f}};
+            else if (folk) pool = {{"Mandoline", 1.f}, {"Mundharmonika", 0.8f}, {"Flöte", 0.8f}, {"Violinen", 0.8f}, {"Akkordeon", 0.5f}};
+            else if (island) pool = {{"Flöte", 1.f}, {"Marimba", 0.5f}, {"Panflöte", 0.5f}};
+            else pool = {{"Celli", 1.2f}, {"Flöte", 1.f}, {"Oboe", 0.6f}, {"Klarinette", 0.6f}, {"Hörner", 0.8f},
+                         {"Violinen", 0.8f}, {"Panflöte", 0.3f}};
+            break;
+        }
+        pool.erase(std::remove_if(pool.begin(), pool.end(), [&](const auto& p) { return used(p.first); }), pool.end());
+        if (pool.empty()) continue;
+        BandLayer L;
+        L.kind = kind;
+        L.inst = pickWeighted(r_, pool);
+        switch (kind) {
+        case 0: L.mode = soft && chance(r_, 0.5f) ? 1 : 0; break;                                  // 1 = schon im Intro
+        case 1: L.mode = s_.energy > 0.7f ? (chance(r_, 0.5f) ? 2 : 0) : (chance(r_, 0.5f) ? 1 : 0); break;   // 0 Arpeggio, 1 Echo, 2 16tel
+        case 2: L.mode = soft ? (chance(r_, 0.6f) ? 3 : irand(r_, 0, 2)) : irand(r_, 0, 3); break;  // Stoß-Muster / Schwellung
+        default: L.mode = chance(r_, 0.5f) ? 1 : 0; break;                                         // 0 Leittöne, 1 Antworten
+        }
+        layers_.push_back(L);
+    }
+}
+
+std::vector<std::string> Builder::layersInfo() const {
+    static const char* modes[4][4] = {{"gehaltene Akkorde", "schon im Intro", "", ""},
+                                      {"Arpeggien", "Melodie-Echo", "16tel-Arpeggien", ""},
+                                      {"Akzent-Stöße", "Backbeat-Stöße", "Offbeat-Stöße", "Schwellungen"},
+                                      {"Leittöne", "Antworten in Melodiepausen", "", ""}};
+    std::vector<std::string> out;
+    for (auto& L : layers_)
+        out.push_back(std::string(layerName(L.kind)) + ": " + L.inst + " (" + modes[L.kind][std::clamp(L.mode, 0, 3)] + ")");
+    return out;
+}
+
+// Reibt der Ton p im Zeitraum [a, b) im Halbtonabstand an der Melodie oder an einem Akkordton?
+bool Builder::layerSafe(int p, Tick a, Tick b, const Chord& ch, const std::vector<Note>& mel) const {
+    for (int iv : ch.intervals) {
+        const int d = mod12(p - (ch.root + iv));
+        if (d == 1 || d == 11) return false;
+    }
+    for (auto& n : mel) {
+        if (n.end() <= a || n.start >= b || n.length < six_) continue;
+        const int d = mod12(n.pitch - p);
+        if (d == 1 || d == 11) return false;
+    }
+    return true;
+}
+
+// Akkordtöne (Terz, Septime, Quinte, Grundton) im Bereich [lo, hi], weit genug auseinander, mit kurzer Stimmführung
+std::vector<int> Builder::layerChord(const Chord& ch, int lo, int hi, int n, Tick a, Tick b, const std::vector<Note>& mel,
+                                     std::vector<int>& prev) const {
+    std::vector<int> pcs;
+    if (ch.intervals.size() > 1) pcs.push_back(mod12(ch.root + ch.intervals[1]));
+    if (ch.intervals.size() > 3) pcs.push_back(mod12(ch.root + ch.intervals[3]));
+    if (ch.intervals.size() > 2) pcs.push_back(mod12(ch.root + ch.intervals[2]));
+    pcs.push_back(mod12(ch.root));
+    std::vector<int> out;
+    for (int pc : pcs) {
+        if (int(out.size()) >= n) break;
+        const int ref = out.size() < prev.size() ? prev[out.size()] : (lo + hi) / 2;
+        int best = -1;
+        for (int p = lo; p <= hi; ++p) {
+            if (mod12(p) != pc || !layerSafe(p, a, b, ch, mel)) continue;
+            bool close = false;
+            for (int q : out) close = close || std::abs(q - p) < 3;
+            if (close) continue;
+            if (best < 0 || std::abs(p - ref) < std::abs(best - ref)) best = p;
+        }
+        if (best >= 0) out.push_back(best);
+    }
+    if (!out.empty()) prev = out;
+    return out;
+}
+
+void Builder::genLayer(BandLayer& L, const SecDef& sd, int occ, bool lastChorus, const std::vector<TChord>& tc, Tick secStart,
+                       float vel, const std::vector<Note>& mel, std::vector<Note>& out) {
+    const Sec t = sd.type;
+    const bool chorus = t == Sec::Chorus;
+    bool play = false;
+    switch (L.kind) {
+    case 0: play = chorus || t == Sec::Bridge || t == Sec::Outro || (t == Sec::Verse && occ >= 1) || (t == Sec::Intro && L.mode == 1); break;
+    case 1: play = !sd.stripped && !sd.solo && (chorus || (t == Sec::Intro && L.mode == 1) || (t == Sec::Bridge && occ == 0 && L.mode == 0)); break;
+    case 2: play = !sd.stripped && (chorus || sd.solo || (t == Sec::Outro && s_.energy > 0.55f) || (t == Sec::Pre && L.mode == 3)); break;
+    default: play = !sd.stripped && !sd.solo && ((t == Sec::Verse && occ >= 1) || (chorus && (occ >= 1 || lastChorus)) || t == Sec::Bridge); break;
+    }
+    if (!play) return;
+    const float lv = vel * (chorus ? (lastChorus ? 1.05f : 0.95f) : 0.8f);
+    const Tick eighth = beat_ / 2;
+    auto push = [&](int p, Tick st, Tick len, float v) { out.push_back({p, st, std::max<Tick>(six_, len), std::clamp(v, 0.05f, 1.f)}); };
+    // Lage der Melodie in diesem Abschnitt (Gegenmelodie bleibt darunter)
+    int mc = baseCenterPitch_;
+    if (!mel.empty()) {
+        float s = 0;
+        for (auto& n : mel) s += float(n.pitch);
+        mc = int(s / float(mel.size()));
+    }
+    for (const TChord& c : tc) {
+        const Tick a = secStart + c.start, b = a + c.len;
+        switch (L.kind) {
+        case 0: {   // Fläche: 2–3 gehaltene Akkordtöne über der Begleitung
+            const bool organ = L.inst == "Orgel" || L.inst == "Kirchenorgel";
+            const auto v = layerChord(c.chord, organ ? 55 : 62, organ ? 74 : 79, organ ? 3 : 2, a, b, mel, L.prev);
+            for (int p : v) push(p, a, c.len - six_ / 2, lv * 0.5f);
+            break;
+        }
+        case 1: {   // Glitzer
+            if (L.mode == 1) {   // Echo: lange Melodietöne eine Oktave höher anschlagen
+                for (auto& n : mel)
+                    if (n.start >= a && n.start < b && n.length >= beat_) push(n.pitch + 12, n.start, beat_, lv * 0.45f);
+                break;
+            }
+            auto v = layerChord(c.chord, 72, 91, 3, a, b, mel, L.prev);
+            if (v.empty()) break;
+            std::sort(v.begin(), v.end());
+            v.push_back(v.front() + 12);
+            const Tick step = L.mode == 2 ? six_ : eighth;
+            int i = 0;
+            for (Tick t2 = 0; t2 < c.len; t2 += step, ++i) {
+                const size_t k = size_t(i) % (2 * v.size() - 2);
+                const int p = v[k < v.size() ? k : 2 * v.size() - 2 - k];   // auf und ab
+                push(p, a + t2, step * 2, lv * (t2 % beat_ == 0 ? 0.45f : 0.36f));
+            }
+            break;
+        }
+        case 2: {   // Bläser
+            const auto v = layerChord(c.chord, 58, 77, 3, a, b, mel, L.prev);
+            if (v.empty()) break;
+            if (L.mode == 3) {   // Schwellung: leise ansetzen, zum Akkordwechsel hin lauter (die Dynamik glättet)
+                for (int p : v) {
+                    push(p, a, c.len / 2, lv * 0.35f);
+                    push(p, a + c.len / 2, c.len / 2 - six_ / 2, lv * 0.55f);
+                }
+                break;
+            }
+            std::vector<int> pat;
+            if (bpb_ == 4) pat = L.mode == 0 ? std::vector<int>{0, 6, 12} : L.mode == 1 ? std::vector<int>{4, 12} : std::vector<int>{2, 6, 10, 14};
+            else pat = {4, 8};
+            for (Tick bo = 0; bo < c.len; bo += bar_)
+                for (int s16 : pat) {
+                    const Tick st = bo + Tick(s16) * six_;
+                    if (st >= c.len) continue;
+                    const Tick len = L.mode == 2 ? six_ + six_ / 2 : eighth;
+                    for (int p : v) push(p, a + st, std::min(len, c.len - st), lv * (s16 == 0 ? 0.72f : 0.62f));
+                }
+            break;
+        }
+        default: {  // Gegenmelodie
+            const bool low = isInst(L.inst, {"Celli", "Hörner", "Posaunen", "Klarinette"});
+            const int lo = low ? 48 : std::max(55, mc - 14), hi = low ? 64 : std::max(lo + 9, mc - 3);
+            if (L.mode == 1) {   // Antworten: nur dort, wo die Melodie Pause macht – kleine Akkordton-Figuren
+                std::vector<int> v;
+                for (int p = lo; p <= hi + 5; ++p) if (c.chord.hasPc(p) && layerSafe(p, a, b, c.chord, {})) v.push_back(p);
+                if (v.empty()) break;
+                int idx = int(v.size()) / 2;
+                for (Tick t2 = 0; t2 < c.len; t2 += eighth) {
+                    const Tick st = a + t2;
+                    bool busy = false;
+                    for (auto& n : mel) busy = busy || (n.start < st + beat_ && n.end() > st - eighth / 2);
+                    if (busy) continue;
+                    push(v[size_t(std::clamp(idx, 0, int(v.size()) - 1))], st, eighth - six_ / 4, lv * 0.55f);
+                    idx += ((t2 / eighth) % 4 == 3) ? -2 : 1;   // steigend, ab und zu zurück
+                    if (idx >= int(v.size())) idx = int(v.size()) - 2;
+                    if (idx < 0) idx = 1;
+                }
+                break;
+            }
+            // Leittöne (Terz/Septime), bei langen Akkorden zweimal – schrittweise verbunden
+            std::vector<int> prevOne = L.prevLine >= 0 ? std::vector<int>{L.prevLine} : std::vector<int>{};
+            const bool split = c.len >= bar_;
+            const Tick half = split ? c.len / 2 : c.len;
+            for (Tick off = 0; off < c.len; off += half) {
+                auto v = layerChord(c.chord, lo, hi, 1, a + off, a + off + half, mel, prevOne);
+                if (v.empty()) continue;
+                push(v[0], a + off, half - six_ / 2, lv * 0.55f);
+                L.prevLine = v[0];
+                prevOne = v;
+            }
+            break;
+        }
+        }
+    }
+}
 // ===================== Begleitung =====================
 // Stimmführung: die Umkehrung wählen, die am wenigsten Bewegung zum vorigen Akkord braucht.
 std::vector<int> Builder::voice(const Chord& c) {
@@ -3449,9 +3815,11 @@ Song Builder::build() {
     if (orch) {
         static const char* inst[OCOUNT] = {"Flöte", "Oboe", "Klarinette", "Fagott", "Hörner", "Trompeten", "Posaunen",
                                            "Pauken", "Schlagzeug", "Taiko", "Glocken", "Harfe", "Chor", "Violinen", "Violinen",
-                                           "Bratschen", "Celli", "Kontrabässe", "Pizzicato", "Tuba", "Piccolo", "Cembalo"};
+                                           "Bratschen", "Celli", "Kontrabässe", "Pizzicato", "Tuba", "Piccolo", "Cembalo",
+                                           "Kirchenorgel", "Celesta"};
         static const float vol[OCOUNT] = {0.7f, 0.7f, 0.7f, 0.6f, 0.6f, 0.55f, 0.55f, 0.8f, 0.6f, 0.75f,
-                                          0.45f, 0.65f, 0.6f, 0.85f, 0.6f, 0.55f, 0.7f, 0.7f, 0.65f, 0.6f, 0.45f, 0.55f};
+                                          0.45f, 0.65f, 0.6f, 0.85f, 0.6f, 0.55f, 0.7f, 0.7f, 0.65f, 0.6f, 0.45f, 0.55f,
+                                          0.5f, 0.5f};
         chordSustains_ = true;
         orch_.clear();
         for (int i = 0; i < OCOUNT; ++i) {
@@ -3470,6 +3838,15 @@ Song Builder::build() {
     makeMaterials();
 
     const auto& st = rs_.structure;
+    // Band: Zusatz-Instrumente für diesen Song würfeln (jeder Song anders besetzt)
+    chooseLayers();
+    std::vector<Track> layerT;
+    for (auto& L : layers_) {
+        static const float lvol[4] = {0.45f, 0.4f, 0.55f, 0.5f}, lpan[4] = {0.f, 0.4f, -0.25f, -0.4f};
+        layerT.push_back({layerName(L.kind), L.inst});
+        layerT.back().volume = lvol[L.kind];
+        layerT.back().pan = lpan[L.kind];
+    }
     std::map<Sec, int> counter;
     Tick cursor = 0;
     for (size_t k = 0; k < st.size(); ++k) {
@@ -3555,6 +3932,11 @@ Song Builder::build() {
                     prev = best;
                 }
                 addNotes(stringT, line, transpose);
+            }
+            for (size_t li = 0; li < layers_.size(); ++li) {   // Zusatz-Instrumente
+                std::vector<Note> ln;
+                genLayer(layers_[li], sd, counter[sd.type], lastChorus, tc, cursor, vel, melNotes, ln);
+                addNotes(layerT[li], ln, transpose);
             }
             addNotes(chordT, accNotes, transpose);
             if (s_.withDrums) {
@@ -3657,6 +4039,7 @@ Song Builder::build() {
         if (!soloT.notes.empty()) song_.tracks.insert(song_.tracks.begin() + 1, soloT);
         if (!voice2T.notes.empty()) song_.tracks.push_back(voice2T);
         if (!stringT.notes.empty()) song_.tracks.push_back(stringT);
+        for (auto& lt : layerT) if (lt.notes.size() >= 4) song_.tracks.push_back(lt);
         if (s_.withDrums) song_.tracks.push_back(drumT);
         if (!s_.withMelody) song_.tracks[0].notes.clear();
     }
@@ -3974,12 +4357,12 @@ void Builder::applyDynamics() {
             if (drum || oi == TI) { role[k] = RPerc; continue; }
             if (!orch) {
                 role[k] = (tr.name == "Melodie" || tr.name == "Solo") ? RMel : tr.name == "Bass" ? RBass
-                        : tr.name == "Zweite Stimme" ? RCounter : RHarm;
+                        : (tr.name == "Zweite Stimme" || tr.name == "Gegenmelodie") ? RCounter : tr.name == "Glitzer" ? RSparkle : RHarm;
                 continue;
             }
             const OrchPlan& o = mats_[st[k].type].orch;
             const bool hasMel = mats_[st[k].type].melody;
-            if (oi == GL) { role[k] = RSparkle; continue; }   // Glockenspiel: Glanz, nicht Hauptsache
+            if (oi == GL || oi == CE) { role[k] = RSparkle; continue; }   // Glockenspiel/Celesta: Glanz, nicht Hauptsache
             if (oi == PI) { role[k] = RDouble; continue; }    // Piccolo verdoppelt die Melodie
             if (oi == TU) { role[k] = RBass; continue; }
             if (hasMel && oi == o.lead) role[k] = RMel;
@@ -3987,6 +4370,7 @@ void Builder::applyDynamics() {
             else if (hasMel && o.mel == MelT::Unison && (oi == V1 || oi == V2 || oi == VA || oi == VC || oi == HN)) role[k] = RDouble;
             else if (hasMel && o.mel != MelT::Solo && oi == o.second) role[k] = RDouble;
             else if (hasMel && o.choir && o.choirMode == 1 && oi == CH) role[k] = RDouble;
+            else if (hasMel && oi >= 0 && (o.tutti & (1 << oi))) role[k] = RDouble;   // Tutti-Verdopplung
             else if (o.counter && oi == o.counterInst) role[k] = RCounter;
             else if (oi == KB || ((oi == VC || oi == FG) && o.bass != BassT::LowOstinato)) role[k] = RBass;
             else role[k] = RHarm;
@@ -4463,6 +4847,10 @@ void balanceBand(Song& song) {
         else if (t.name == "Schlagzeug") target = -3.5f;
         else if (t.name == "Zweite Stimme") target = -9.f;
         else if (t.name == "Streicher-Linie") target = -10.f;
+        else if (t.name == "Fläche") target = -11.f;
+        else if (t.name == "Glitzer") target = -10.f;
+        else if (t.name == "Bläser") target = -7.f;
+        else if (t.name == "Gegenmelodie") target = -8.5f;
         else target = -8.f;
         // im Fenster messen; spielt die Spur dort nicht, dann in ihrem eigenen ersten Abschnitt
         Tick a = wa, b = wb;
@@ -4519,6 +4907,10 @@ void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
             else if (n == "Solo") { rev = 0.2f; del = 0.2f; }
             else if (n == "Zweite Stimme") { rev = 0.28f; del = leadEcho ? 0.12f : 0.f; }
             else if (n == "Streicher-Linie") rev = 0.36f;
+            else if (n == "Fläche") rev = 0.38f;
+            else if (n == "Glitzer") { rev = 0.35f; del = 0.15f; }
+            else if (n == "Bläser") rev = 0.22f;
+            else if (n == "Gegenmelodie") { rev = 0.3f; del = leadEcho ? 0.08f : 0.f; }
             else if (n == "Begleitung") {
                 auto inst = InstrumentRegistry::instance().create(t.instrument);
                 rev = (inst && inst->sustains()) ? 0.3f : 0.22f;
@@ -4541,6 +4933,8 @@ void applyMix(Song& song, const GeneratorSettings& s, const Resolved& rs) {
             else if (has("Tuba")) rev = 0.18f;
             else if (has("Piccolo")) rev = 0.3f;
             else if (has("Cembalo")) rev = 0.22f;
+            else if (has("Orgel")) rev = 0.42f;
+            else if (has("Celesta")) rev = 0.38f;
         }
         t.reverb = rev;
         t.delay = del;
@@ -4579,7 +4973,7 @@ Song generateSong(const GeneratorSettings& s, GenerationInfo* info, std::atomic<
     Song best;
     float bestScore = -1e30f;
     int evaluated = 0;
-    std::vector<std::string> bestProg, bestTech, bestSys;
+    std::vector<std::string> bestProg, bestTech, bestSys, bestLayers;
     int bestTry = 0;
     for (int t = 0; t < tries; ++t) {
         if (s.onlyTry >= 0 && t != std::min(s.onlyTry, tries - 1)) continue;   // nur der gewünschte Durchgang
@@ -4594,6 +4988,7 @@ Song generateSong(const GeneratorSettings& s, GenerationInfo* info, std::atomic<
             bestProg = b.progressionInfo();
             bestSys = b.systemsInfo();
             bestTech = s.ensemble == Ensemble::Orchestra ? b.orchInfo() : std::vector<std::string>{};
+            bestLayers = b.layersInfo();
         }
     }
 
@@ -4620,6 +5015,7 @@ Song generateSong(const GeneratorSettings& s, GenerationInfo* info, std::atomic<
         info->drums = s.withDrums ? drumStyleName(rs.drumStyle) : "aus";
         info->orchStyle = s.ensemble == Ensemble::Orchestra ? orchProfiles()[size_t(rs.orchStyle)].name : "";
         info->techniques = bestTech;
+        info->layers = bestLayers;
         info->notes.clear();
         if (rs.keyChangeAt >= 0)
             info->notes = "Rückung um " + std::to_string(rs.keyChangeSemis) + " Halbton/-töne im letzten Refrain";

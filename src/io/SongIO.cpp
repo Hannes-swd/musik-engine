@@ -33,7 +33,7 @@ static json generatorToJson(const GeneratorSettings& g) {
         {"melodyInstrument", g.melodyInstrument}, {"chordInstrument", g.chordInstrument},
         {"bassInstrument", g.bassInstrument}, {"quality", g.quality},
         {"withDrums", g.withDrums}, {"drums", int(g.drums)}, {"drumInstrument", g.drumInstrument},
-        {"ensemble", int(g.ensemble)}, {"orchStyle", g.orchStyle},
+        {"ensemble", int(g.ensemble)}, {"orchStyle", g.orchStyle}, {"orchFullness", g.orchFullness}, {"extraLayers", g.extraLayers},
         {"swing", g.swing}, {"ambitus", g.ambitus}, {"leaps", g.leaps}, {"repetition", g.repetition},
         {"harmonicRhythm", g.harmonicRhythm}, {"jazzChords", g.jazzChords}, {"colorChords", g.colorChords},
         {"dynamicRange", g.dynamicRange}, {"useIntro", g.useIntro}, {"usePre", g.usePre},
@@ -74,6 +74,8 @@ static GeneratorSettings generatorFromJson(const json& j) {
     g.drumInstrument = j.value("drumInstrument", g.drumInstrument);
     g.ensemble = j.value("ensemble", 0) == 1 ? Ensemble::Orchestra : Ensemble::Band;
     g.orchStyle = j.value("orchStyle", g.orchStyle);
+    g.orchFullness = std::clamp(j.value("orchFullness", g.orchFullness), 0.f, 1.f);
+    g.extraLayers = std::clamp(j.value("extraLayers", g.extraLayers), -1, 4);
     g.swing = j.value("swing", g.swing);
     g.ambitus = j.value("ambitus", g.ambitus);
     g.leaps = j.value("leaps", g.leaps);
